@@ -14,6 +14,10 @@
 //
 //  Một cổng AXI4 master (ghi và đọc độc lập theo kênh), 1 ID.
 //  Mọi khối chạy trên clk (clk_sys) trừ phần đầu của isp_ingress.
+//
+//  06/11/2026: nối giao thức giữ chỗ completion mới
+//  (u02_scheduler.cpl_rsv -> roi_cpl_queue.rsv_a, roi_cpl_queue.a_room ->
+//  u02_scheduler.cpl_room) thay cho cpl_full.
 // =====================================================================
 module u02_top
     import u02_pkg::*;
@@ -117,6 +121,7 @@ module u02_top
 
     // roi_cpl_queue
     logic                               sch_cpl_push, cpl_pop, cpl_valid, cpl_full, cpl_ovf;
+    logic                               sch_cpl_rsv, cpl_room;
     u02_roi_cpl_t                       sch_cpl, inv_cpl, cpl_head;
     logic [$clog2(ROI_QUEUE_DEPTH):0]   cpl_count;
 
@@ -216,7 +221,7 @@ module u02_top
 
     roi_cpl_queue u_cpl_q (
         .clk(clk), .rst_n(rst_n),
-        .push_a(sch_cpl_push), .din_a(sch_cpl),
+        .push_a(sch_cpl_push), .din_a(sch_cpl), .rsv_a(sch_cpl_rsv), .a_room(cpl_room),
         .push_b(rf_q_invalid), .din_b(inv_cpl),
         .pop(cpl_pop), .dout(cpl_head), .valid(cpl_valid), .full(cpl_full), .count(cpl_count),
         .ovf_evt(cpl_ovf)
@@ -243,7 +248,7 @@ module u02_top
         .roi_done(roi_done), .roi_err(roi_err),
         .rd_cnt_clear(rd_cnt_clear), .rd_beat_cnt(rd_beat_cnt),
         .ibuf_release(u01_ibuf_release),
-        .cpl_push(sch_cpl_push), .cpl(sch_cpl), .cpl_full(cpl_full),
+        .cpl_push(sch_cpl_push), .cpl(sch_cpl), .cpl_room(cpl_room), .cpl_rsv(sch_cpl_rsv),
         .busy(sch_busy), .done_evt(sch_done)
     );
 
@@ -328,7 +333,7 @@ module u02_top
     );
 
     // Tín hiệu chỉ để quan sát / dành cho mở rộng
-    wire unused = ^{q_push_ok, q_afull, fb_alloc_fid, rg_busy, ps_roi_id, ps_frame_id,
+    wire unused = ^{q_push_ok, q_afull, fb_alloc_fid, cpl_full, rg_busy, ps_roi_id, ps_frame_id,
                     ps_eol, ps_eof, ps_first, ps_split, ps_err_zero};
 
 endmodule

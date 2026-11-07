@@ -13,7 +13,7 @@
 //   - roi_done: xung sau 3..32 chu kỳ kể từ khi busy
 //
 // Chạy: sim/run_all.do
-// Kỳ vọng ở commit này (RTL gốc): FAIL. Commit sửa lỗi kế tiếp làm TB PASS.
+// RTL trước commit "Fix ..." (lịch sử git) làm TB này FAIL; RTL hiện tại PASS.
 //
 // Tiêu chí:
 //   (1) Mỗi ROI scheduler đã lấy khỏi hàng descriptor có ĐÚNG 1 completion
@@ -52,6 +52,7 @@ module tb_bug2_sched_cpl;
     u02_roi_cpl_t        din_b = '0, dout;
     logic                valid, full, ovf_evt;
     logic [$clog2(DEPTH):0] count;
+    logic                cpl_room, cpl_rsv;
 
     assign lookup_hit = !lookup_fid[7];
 
@@ -65,13 +66,14 @@ module tb_bug2_sched_cpl;
         .roi_done(roi_done), .roi_err(roi_err),
         .rd_cnt_clear(rd_cnt_clear), .rd_beat_cnt(20'd10),
         .ibuf_release(ibuf_release),
-        .cpl_push(sch_push), .cpl(sch_cpl), .cpl_full(full),
+        .cpl_push(sch_push), .cpl(sch_cpl), .cpl_room(cpl_room), .cpl_rsv(cpl_rsv),
         .busy(busy), .done_evt(done_evt)
     );
 
     roi_cpl_queue #(.DEPTH(DEPTH)) u_cpl (
         .clk(clk), .rst_n(rst_n),
         .push_a(sch_push), .din_a(sch_cpl),
+        .rsv_a(cpl_rsv), .a_room(cpl_room),
         .push_b(push_b), .din_b(din_b),
         .pop(pop), .dout(dout), .valid(valid), .full(full), .count(count),
         .ovf_evt(ovf_evt)

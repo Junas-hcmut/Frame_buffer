@@ -11,6 +11,18 @@
 //    không tìm thấy -> ROI bị STALE.
 //  - Ưu tiên reader: buffer đang được acquire trong chu kỳ này không bị
 //    alloc thu hồi.
+//
+// Thứ tự commit (sửa lỗi 3, review 06/11/2026):
+//  Bản cũ dùng age[i] = bộ đếm 16 bit lúc commit và chọn age nhỏ nhất.
+//  Sau 65.536 khung (~36 phút @30 fps) bộ đếm tràn vòng: khung MỚI NHẤT
+//  nhận age = 0 và bị thu hồi trước khung cũ.
+//  Bản mới dùng ma trận tuổi (age matrix) NUM_FB x NUM_FB:
+//     older[i][j] = 1  <=>  buffer i được commit TRƯỚC buffer j
+//  Commit buffer k: hàng k xóa về 0 (k không cũ hơn ai), cột k đặt 1
+//  (mọi buffer khác cũ hơn k). Giữa các buffer đã từng commit, ma trận
+//  luôn là một thứ tự toàn phần -> không bao giờ tràn vòng, kể cả khi
+//  một buffer bị reader giữ rất lâu. Chi phí: NUM_FB*(NUM_FB-1) = 6 FF
+//  thay cho 3x16 + 16 = 64 FF.
 // =====================================================================
 module frame_buf_mgr
     import u02_pkg::*;
@@ -49,11 +61,10 @@ module frame_buf_mgr
 
     fb_state_t   st  [NUM_FB];
     logic [7:0]  fid [NUM_FB];
-    logic [15:0] age [NUM_FB];     // thứ tự commit, dùng chọn READY cũ nhất
+    logic [NUM_FB-1:0] older [NUM_FB];   // older[i][j]: i commit trước j (đường chéo không dùng)
     logic [1:0]  rc  [NUM_FB];     // số reader đang giữ
 
     logic [7:0]  fid_cnt;
-    logic [15:0] age_cnt;
 
     // ---------------- Tra cứu cho reader ----------------
     always_comb begin
@@ -70,26 +81,30 @@ module frame_buf_mgr
     wire acq_fire = acq_req && lookup_hit;
 
     // ---------------- Chọn buffer cho writer ----------------
-    logic        found_free, found_ready;
-    logic [1:0]  free_idx, ready_idx;
-    logic [15:0] best_age;
+    logic              found_free, found_ready;
+    logic [1:0]        free_idx, ready_idx;
+    logic [NUM_FB-1:0] elig;          // READY, không reader giữ, không bị acquire chu kỳ này
+    logic              is_oldest;
 
     always_comb begin
         found_free  = 1'b0;  free_idx  = '0;
         found_ready = 1'b0;  ready_idx = '0;
-        best_age    = '1;
         for (int i = NUM_FB - 1; i >= 0; i--) begin
             if (st[i] == FB_FREE) begin
                 found_free = 1'b1;
                 free_idx   = 2'(i);
             end
         end
+        for (int i = 0; i < NUM_FB; i++)
+            elig[i] = (st[i] == FB_READY) && (rc[i] == 2'd0) && !(acq_fire && lookup_idx == 2'(i));
+        // buffer cũ nhất = buffer đủ điều kiện, cũ hơn mọi buffer đủ điều kiện khác
         for (int i = 0; i < NUM_FB; i++) begin
-            if (st[i] == FB_READY && rc[i] == 2'd0 && !(acq_fire && lookup_idx == 2'(i)) &&
-                (!found_ready || age[i] < best_age)) begin
+            is_oldest = elig[i];
+            for (int j = 0; j < NUM_FB; j++)
+                if (j != i && elig[j] && !older[i][j]) is_oldest = 1'b0;
+            if (is_oldest && !found_ready) begin
                 found_ready = 1'b1;
                 ready_idx   = 2'(i);
-                best_age    = age[i];
             end
         end
     end
@@ -103,12 +118,11 @@ module frame_buf_mgr
         if (!rst_n) begin
             for (int i = 0; i < NUM_FB; i++) begin
                 st[i]  <= FB_FREE;
-                fid[i] <= '0;
-                age[i] <= '0;
-                rc[i]  <= '0;
+                fid[i]   <= '0;
+                older[i] <= '0;
+                rc[i]    <= '0;
             end
             fid_cnt       <= '0;
-            age_cnt       <= '0;
             latest_fid    <= '0;
             latest_valid  <= 1'b0;
             cnt_committed <= '0;
@@ -135,8 +149,11 @@ module frame_buf_mgr
             // Khung ghi xong
             if (commit_evt) begin
                 st[commit_idx]  <= FB_READY;
-                age[commit_idx] <= age_cnt;
-                age_cnt         <= age_cnt + 1'b1;
+                // commit_idx thành buffer mới nhất
+                for (int j = 0; j < NUM_FB; j++) begin
+                    if (2'(j) == commit_idx) older[j]             <= '0;
+                    else                     older[j][commit_idx] <= 1'b1;
+                end
                 latest_fid      <= fid[commit_idx];
                 latest_valid    <= 1'b1;
                 cnt_committed   <= cnt_committed + 1'b1;

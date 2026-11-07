@@ -5,7 +5,7 @@
 // không phát ovf_evt khi ghi đúng chu kỳ hàng đầy và có pop.
 //
 // Chạy: sim/run_all.do
-// Kỳ vọng ở commit này (RTL gốc): FAIL. Commit sửa lỗi kế tiếp làm TB PASS.
+// RTL trước commit "Fix ..." (lịch sử git) làm TB này FAIL; RTL hiện tại PASS.
 //
 // Tiêu chí (bảo toàn): mỗi entry đã push phải hoặc được pop ra đúng 1 lần,
 // hoặc được báo bằng đúng 1 xung ovf_evt. Không có trường hợp thứ ba.
@@ -25,10 +25,13 @@ module tb_bug1_cpl_queue;
     u02_roi_cpl_t din_a = '0, din_b = '0, dout;
     logic         valid, full, ovf_evt;
     logic [$clog2(DEPTH):0] count;
+    logic         a_room;
+    logic         rsv_a = 1'b0;     // test riêng queue: không có ROI đang chạy
 
     roi_cpl_queue #(.DEPTH(DEPTH)) dut (
         .clk(clk), .rst_n(rst_n),
         .push_a(push_a), .din_a(din_a),
+        .rsv_a(rsv_a), .a_room(a_room),
         .push_b(push_b), .din_b(din_b),
         .pop(pop), .dout(dout), .valid(valid), .full(full), .count(count),
         .ovf_evt(ovf_evt)
@@ -127,7 +130,7 @@ module tb_bug1_cpl_queue;
         for (cyc = 0; cyc < 20000; cyc++) begin
             idle_inputs();
             // A tuân thủ giao thức của từng bản: gốc dùng !full, bản sửa dùng a_room
-            if (!full  && ($urandom % 100) < 30) do_a();
+            if (a_room && ($urandom % 100) < 30) do_a();
             if ((cyc - last_b) >= 2 && ($urandom % 100) < 35) begin do_b(); last_b = cyc; end
             if (valid && ($urandom % 100) < 45) pop = 1;
             step();

@@ -5,7 +5,7 @@
 // 65.536 lần commit bộ đếm tràn vòng -> khung MỚI NHẤT bị thu hồi.
 //
 // Chạy: sim/run_all.do
-// Kỳ vọng ở commit này (RTL gốc): FAIL. Commit sửa lỗi kế tiếp làm TB PASS.
+// RTL trước commit "Fix ..." (lịch sử git) làm TB này FAIL; RTL hiện tại PASS.
 //
 // Mô hình tham chiếu trong TB giữ thứ tự commit chính xác (danh sách),
 // không dùng bộ đếm hữu hạn. Mỗi lần alloc:
