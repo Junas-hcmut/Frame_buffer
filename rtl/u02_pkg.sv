@@ -1,5 +1,14 @@
 `timescale 1ns / 1ps
 
+// =====================================================================
+// u02_pkg (bản 06/11/2026)
+// Thay đổi so với bản 156 dòng:
+//  + BURST_BYTES, FRAME_BURSTS        (isp_ingress / axi_master_wr)
+//  + wr_kind_t, u02_wr_cmd_t          (lệnh ghi isp_ingress -> axi_master_wr)
+//  + u02_row_info_t                   (row_cmd_gen -> row_info FIFO -> axis_crop)
+//  * u02_roi_cpl_t.bytes_ddr 16 -> 20 bit (ROI 128x128 dec4 đọc 184.320 B)
+//  * chú thích t_start: ghi lúc dispatch, không phải lúc AR đầu tiên
+// =====================================================================
 package u02_pkg;
 
     // -------------------------------------------------------------
@@ -12,7 +21,7 @@ package u02_pkg;
     localparam int FRAME_WIDTH       = 640;
     localparam int FRAME_HEIGHT      = 480;
     localparam int PIXEL_BYTES       = 3;         // RGB888: 3 Bytes / Pixel
-    localparam int FRAME_STRIDE_B    = 1920;      // 640 px * 3 B/px = 1920 Bytes (30 * 64B burst align)
+    localparam int FRAME_STRIDE_B    = 1920;      // 640 px * 3 B/px = 1920 Bytes (15 * 128B burst align)
     localparam int FRAME_SIZE_B      = 921600;    // 1920 * 480 = 921,600 Bytes / Khung
 
     // Địa chỉ cơ sở 3 Frame Buffer trong DDR (mỗi khe 1 MB)
@@ -52,6 +61,10 @@ package u02_pkg;
     localparam int AXI_PAGE_BYTES    = 4096;      // burst không được vượt ranh giới 4 KB
     localparam int AXIS_DATA_WIDTH   = 64;
     localparam int AXIS_KEEP_WIDTH   = 8;
+
+    // Nhánh ghi: khung được ghi bằng các burst đầy đủ 16 beat, căn lề 128 B
+    localparam int BURST_BYTES       = MAX_BURST_BEATS * AXI_DATA_WIDTH / 8;   // 128
+    localparam int FRAME_BURSTS      = FRAME_SIZE_B / BURST_BYTES;             // 7200 (vừa 13 bit)
 
     // -------------------------------------------------------------
     // 2. Định nghĩa cấu trúc Header Beat 64-bit (U02 -> U01)
@@ -95,7 +108,7 @@ package u02_pkg;
     } u02_roi_desc_t;
 
     // -------------------------------------------------------------
-    // 4. Completion descriptor (roi_cpl_queue)
+    // 4. Completion descriptor (roi_cpl_queue) - 199 bit
     // -------------------------------------------------------------
     typedef enum logic [2:0] {
         CPL_OK           = 3'd0,
@@ -109,16 +122,51 @@ package u02_pkg;
         logic [7:0]          roi_id;
         logic [7:0]          frame_id;
         cpl_status_t         status;
-        logic [TS_WIDTH-1:0] t_submit;     // lúc push vào hàng đợi
-        logic [TS_WIDTH-1:0] t_start;      // AR đầu tiên của ROI
-        logic [TS_WIDTH-1:0] t_end;        // bắt tay tlast
-        logic [15:0]         bytes_ddr;    // byte đọc thực tế trên AXI
-        logic [15:0]         bytes_stream; // byte payload phát sang U01
+        logic [TS_WIDTH-1:0] t_submit;     // lúc push vào hàng đợi (regfile)
+        logic [TS_WIDTH-1:0] t_start;      // lúc scheduler dispatch ROI (cùng chu kỳ rg_start)
+        logic [TS_WIDTH-1:0] t_end;        // chu kỳ ghi completion (bắt tay tlast)
+        logic [19:0]         bytes_ddr;    // byte đọc thực tế trên AXI (= beat * 8, tối đa 184.320)
+        logic [15:0]         bytes_stream; // byte payload phát sang U01 (W*H*3, tối đa 49.152)
     } u02_roi_cpl_t;
+
+    // -------------------------------------------------------------
+    // 5. Thông tin hàng (row_cmd_gen -> row_info FIFO -> axis_crop) - 91 bit
+    // -------------------------------------------------------------
+    // Mỗi hàng ngõ ra = lead_pad pixel pad + n_valid pixel đọc từ DDR
+    //                 + trail_pad pixel pad;  lead + n_valid + trail = W.
+    // Hàng nằm ngoài khung: lead_pad = W, n_valid = trail_pad = 0.
+    // hdr chỉ có ý nghĩa ở hàng first (axis_crop phát header trước hàng đầu).
+    typedef struct packed {
+        u02_header_t  hdr;        // header beat của ROI
+        logic         first;      // hàng ngõ ra đầu tiên của ROI
+        logic         last;       // hàng ngõ ra cuối cùng (beat cuối mang tlast)
+        logic [1:0]   dec_log2;   // bước lấy mẫu cột: lấy 1 pixel mỗi 2^dec_log2
+        logic [7:0]   lead_pad;   // 0..128
+        logic [7:0]   n_valid;    // 0..128
+        logic [7:0]   trail_pad;  // 0..128
+    } u02_row_info_t;
+
+    // -------------------------------------------------------------
+    // 6. Lệnh ghi (isp_ingress -> axi_master_wr)
+    // -------------------------------------------------------------
+    // Mỗi lệnh WR_DATA / WR_DATA_LAST đi kèm đúng 16 từ 64-bit trong FIFO
+    // dữ liệu. WR_ABORT không kèm dữ liệu: báo hủy khung buf_idx (sau khi
+    // các burst đã gửi trước đó nhận đủ BRESP thì phát abort_evt).
+    typedef enum logic [1:0] {
+        WR_DATA      = 2'd0,   // burst thường
+        WR_DATA_LAST = 2'd1,   // burst cuối khung: BRESP về -> commit_evt
+        WR_ABORT     = 2'd2    // hủy khung
+    } wr_kind_t;
+
+    typedef struct packed {
+        logic [31:0] addr;       // địa chỉ burst (căn lề 128 B)
+        logic [1:0]  buf_idx;    // frame buffer đích (0..NUM_FB-1)
+        wr_kind_t    kind;
+    } u02_wr_cmd_t;
 
     /* verilator lint_off UNUSEDSIGNAL */
     // -------------------------------------------------------------
-    // 5. Hàm tiện ích
+    // 7. Hàm tiện ích
     // -------------------------------------------------------------
     // Kiểm tra descriptor lúc push; sai -> CPL_INVALID, không vào hàng đợi
     function automatic logic roi_desc_valid(input u02_roi_desc_t d);
