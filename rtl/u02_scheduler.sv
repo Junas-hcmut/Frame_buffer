@@ -3,7 +3,7 @@
 // =====================================================================
 // u02_scheduler (ĐA2): phục vụ ROI theo thứ tự FIFO, mỗi lúc 1 ROI.
 //
-// Với ROI ở đầu hàng đợi (khi cfg_enable = 1 và hàng completion còn chỗ):
+// Với ROI ở đầu hàng đợi (khi cfg_enable = 1 và roi_cpl_queue báo cpl_room):
 //  1. deadline != 0 và đã quá hạn           -> CPL_DROPPED_LATE
 //  2. frame_id không còn READY/READING       -> CPL_STALE
 //  3. U01 chưa có credit bộ đệm đầu vào      -> chờ
@@ -13,6 +13,15 @@
 // Credit: dùng = số header đã phát - số xung ibuf_release; có thể phát khi
 // dùng < cfg_ibuf_n.
 // Điểm mở rộng cho DATN: thay bước chọn ROI đầu hàng bằng EDF.
+//
+// Giao thức với roi_cpl_queue (sửa lỗi 2, review 06/11/2026):
+//  - Chỉ drop hoặc dispatch khi cpl_room = 1 -> drop luôn có chỗ ghi.
+//  - cpl_rsv = 1 từ chu kỳ dispatch tới hết chu kỳ finish: hàng completion
+//    giữ 1 chỗ cho ROI đang chạy, CPL_INVALID từ regfile không được lấy
+//    chỗ này. Nhờ vậy completion lúc finish (xung 1 chu kỳ, không chờ
+//    được) không bao giờ bị mất.
+//  - Bản cũ: can_eval chỉ kiểm !cpl_full lúc dispatch; INVALID đến trong
+//    lúc ROI chạy có thể làm đầy hàng -> completion OK bị bỏ.
 // =====================================================================
 module u02_scheduler
     import u02_pkg::*;
@@ -55,7 +64,8 @@ module u02_scheduler
     // Completion
     output logic                 cpl_push,
     output u02_roi_cpl_t         cpl,
-    input  logic                 cpl_full,
+    input  logic                 cpl_room,       // roi_cpl_queue.a_room
+    output logic                 cpl_rsv,        // roi_cpl_queue.rsv_a
 
     output logic                 busy,
     output logic                 done_evt
@@ -66,12 +76,12 @@ module u02_scheduler
 
     u02_roi_desc_t       cur;
     logic [1:0]          cur_idx;
-    logic [TS_WIDTH-1:0] t_start;
+    logic [TS_WIDTH-1:0] t_start;        // ts lúc dispatch
     logic [4:0]          used;           // credit đang dùng
 
     wire late      = (q_desc.deadline != '0) && ($signed(ts_now - q_desc.deadline) > 0);
     wire credit_ok = (used < {1'b0, cfg_ibuf_n});
-    wire can_eval  = (st == S_IDLE) && cfg_enable && q_valid && !cpl_full;
+    wire can_eval  = (st == S_IDLE) && cfg_enable && q_valid && cpl_room;
 
     wire drop_late = can_eval && late;
     wire drop_stale= can_eval && !late && !lookup_hit;
@@ -85,6 +95,7 @@ module u02_scheduler
     assign rg_base      = fb_base(lookup_idx);
     assign rd_cnt_clear = dispatch;
     assign busy         = (st == S_RUN);
+    assign cpl_rsv      = (st == S_RUN) || dispatch;     // ROI nợ 1 completion
 
     // Completion (tổ hợp, đẩy trong chu kỳ quyết định)
     wire finish = (st == S_RUN) && roi_done;
