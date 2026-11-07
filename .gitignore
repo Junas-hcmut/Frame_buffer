@@ -1,0 +1,26 @@
+# ModelSim / Questa
+work/
+work_*/
+lib_*/
+modelsim.ini
+transcript
+*.wlf
+*.vstf
+wlft*
+*.dbg
+*.mpf
+*.cr.mti
+
+# Verilator / Icarus
+obj_dir/
+*.vvp
+*.vcd
+*.fst
+
+# Hệ điều hành / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+*.bak
+*~
