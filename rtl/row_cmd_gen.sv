@@ -96,9 +96,10 @@ module row_cmd_gen
         first_x = x_q + $signed(CW'(lead_c) << dl_q);
         span_px = (nval_c == 8'd0) ? '0 : (((CW'(nval_c) - 1'b1) << dl_q) + 1'b1);
 
-        has_pad_c = (x_q < 0) || (y_q < 0) ||
-                    (x_q + $signed(CW'(w_q) << dl_q) > FW) ||
-                    (y_q + $signed(CW'(h_q) << dl_q) > FH);
+        // has_pad = có ít nhất 1 pixel ngõ ra là pad. Pixel/hàng cuối được lấy
+        // mẫu tại x + (W-1)*dec và y + (H-1)*dec (không phải x + W*dec).
+        has_pad_c = (lead_c != 8'd0) || (trail_c != 8'd0) || (y_q < 0) ||
+                    (y_q + $signed((CW'(h_q) - 1'b1) << dl_q) >= FH);
     end
 
     // ---------------- Hàng hiện tại ----------------

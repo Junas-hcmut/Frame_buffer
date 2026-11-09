@@ -1,0 +1,17 @@
+../rtl/u02_pkg.sv
+../rtl/common/sync_fifo.sv
+../rtl/common/async_fifo.sv
+../rtl/common/rst_sync.sv
+../rtl/common/skid_buffer.sv
+../rtl/regfile.sv
+../rtl/roi_desc_queue.sv
+../rtl/roi_cpl_queue.sv
+../rtl/frame_buf_mgr.sv
+../rtl/u02_scheduler.sv
+../rtl/row_cmd_gen.sv
+../rtl/page_splitter.sv
+../rtl/axi_master_rd.sv
+../rtl/axis_crop.sv
+../rtl/isp_ingress.sv
+../rtl/axi_master_wr.sv
+../rtl/u02_top.sv
