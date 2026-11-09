@@ -179,7 +179,7 @@ module tb_u02_top;
         t_stall <= tvalid && !tready; t_h <= tdata; k_h <= tkeep; l_h <= tlast; u_h <= tuser;
         if (tvalid && tready) begin
             if (!in_pkt) begin
-                if (!tuser[0]) begin err("beat đầu gói không có TUSER"); if ($test$plusargs("DBG")) $display("   tdata=%h tkeep=%h tlast=%b | crop: flush=%b hdr_sent=%b acnt=%0d bcnt=%0d p=%0d ri_valid=%b first=%b last=%b lead=%0d n=%0d trail=%0d | sched st=%0d", tdata, tkeep, tlast, dut.u_crop.flush, dut.u_crop.hdr_sent, dut.u_crop.acnt, dut.u_crop.bcnt, dut.u_crop.p, dut.u_crop.ri_valid, dut.u_crop.ri.first, dut.u_crop.ri.last, dut.u_crop.ri.lead_pad, dut.u_crop.ri.n_valid, dut.u_crop.ri.trail_pad, dut.u_sched.st); end
+                if (!tuser[0]) begin err("beat đầu gói không có TUSER"); if ($test$plusargs("DBG")) $display("   tdata=%h tkeep=%h tlast=%b | crop: st=%0d oc=%0d rem=%0d pad_rem=%0d ri_valid=%b first=%b last=%b lead=%0d n=%0d trail=%0d | sched st=%0d", tdata, tkeep, tlast, dut.u_crop.st, dut.u_crop.oc, dut.u_crop.rem, dut.u_crop.pad_rem, dut.u_crop.ri_valid, dut.u_crop.ri.first, dut.u_crop.ri.last, dut.u_crop.ri.lead_pad, dut.u_crop.ri.n_valid, dut.u_crop.ri.trail_pad, dut.u_sched.st); end
                 if (tkeep != 8'hFF || tlast) err("header sai TKEEP/TLAST");
                 hdr = tdata; in_pkt = 1; pkt.delete();
             end else begin

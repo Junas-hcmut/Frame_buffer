@@ -21,13 +21,15 @@ rtl/                  17 file tổng hợp được, top = u02_top (thứ tự b
   row_cmd_gen.sv      tách ROI thành lệnh đọc theo hàng (lead pad / valid / trail pad)
   page_splitter.sv    chia lệnh đọc thành burst ≤ 16 beat, không vượt 4 KB
   axi_master_rd.sv    AXI4 read master
-  axis_crop.sv        ghép header + pad + pixel (decimation) thành AXI4-Stream
+  axis_crop.sv        ghép header + pad + pixel (decimation) thành AXI4-Stream, ≤ 8 B/clk
   common/             sync_fifo, async_fifo, skid_buffer, rst_sync
 tb/
   tb_u02_top.sv       toàn hệ thống: ISP VGA, DDR AXI4 ngẫu nhiên, U01 nội tuyến, CPU APB, kiểm từng byte
   tb_u02_u01m.sv      toàn hệ thống với mô hình U01 tách rời (u01_model.sv)
   tb_lat.sv           đo latency với DDR lý tưởng (+RLAT, +BLAT, +FASTISP)
   read_roi.py         đọc file ROI .hex do u01_model xuất (+U01_DUMP)
+  tb_read_path.sv     nhánh đọc row_cmd_gen → axis_crop so với mô hình vàng độc lập
+  tb_axi_master_wr.sv AXI write master với slave ngẫu nhiên, tiêm BRESP lỗi, slave chờ WVALID
   tb_bug1..3_*.sv     hồi quy cho lỗi 1–3 (review 06/11/2026)
   tb_page_splitter.sv, tb_roi_desc_queue.sv
 sim/                  rtl.f, run_all.do (ModelSim/Questa), run_all_verilator.sh, run_legacy.do
@@ -68,8 +70,23 @@ Verilator 5.x: `cd sim && ./run_all_verilator.sh`.
   `axi_master_wr` phát W không chờ AWREADY (AXI4 A3.3.1). Các sửa lỗi 1–3 ở trên
   được giữ (thay cho cách vá `b_pend` / so sánh age có dấu của v2).
 
+## Latency nhánh đọc (`tb_lat +RLAT=30 +FASTISP`, chu kỳ clk_sys từ dispatch tới tlast)
+
+| ROI | axis_crop v2 (1 pixel/clk) | axis_crop hiện tại (≤ 8 B/clk) | Beat R đọc DDR |
+|---|---:|---:|---:|
+| 128×128 dec1 | 16 424 | 6 692 | 6 272 |
+| 128×128 dec2 | 16 425 | 12 836 | 12 416 |
+| 128×112 dec4 | 28 601 | 21 876 | 21 504 |
+| 64×64 dec1 | 4 136 | 1 828 | 1 600 |
+| 16×16 dec1 | 296 | 196 | 112 |
+| 16×16 toàn pad | 262 | 148 | 0 |
+
+Với axis_crop hiện tại, latency xấp xỉ số beat R: nhánh đọc bị giới hạn bởi băng
+thông AXI chứ không còn bởi axis_crop. Đổi lại axis_crop dùng bộ dịch 128 bit và
+mạch nén byte – cần đối chiếu diện tích khi tổng hợp (mục E).
+
 ## Việc còn mở
 
 Xem danh sách A1–A7, B1–B8, C, D, E trong ghi chú dự án. Chính: deadline tuyệt
 đối 48 bit ở driver (A1), frame_id 8 bit (A2), push khi đầy không có completion (A3),
-2 buffer WRITING khi abort (A4).
+2 buffer WRITING khi abort (A4). A5 (throughput axis_crop) đã xử lý – bảng trên.

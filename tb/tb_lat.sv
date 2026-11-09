@@ -119,7 +119,7 @@ module tb_lat;
             if (dut.u_rd.c_valid && !dut.u_rd.c_ready && dut.u_rd.credit < dut.u_rd.need) p_credit++;
             if (dut.u_rd.c_valid && !dut.u_rd.c_ready && dut.u_rd.ost == 4) p_ost++;
             if (!dut.u_rd.c_valid) p_cvalid0++;
-            if (dut.u_crop.add) p_crop_add++;
+            if (dut.u_crop.ck_hs) p_crop_add += dut.u_crop.ck_cnt;   // byte axis_crop nhận vào packer
         end
         if (arvalid && arready) begin n_ar++; if (c_ar < 0) c_ar = cyc; end
         if (rvalid && rready) begin n_r++; if (c_r < 0) c_r = cyc; end
@@ -148,7 +148,7 @@ module tb_lat;
         $display("%s | st=%0d push->disp=%0d disp->AR=%0d AR->R=%0d disp->hdr=%0d disp->pay1=%0d (-1 = không có) | tstart-tsub=%0d tend-tstart=%0d (%.2f us) | AR=%0d Rbeats=%0d AXISbeats=%0d W*H=%0d bytes_ddr=%0d",
                  name, id[18:16], c_disp - push_cyc, (c_ar < 0) ? -1 : c_ar - c_disp, (c_ar < 0) ? -1 : c_r - c_ar, c_hdr - c_disp, c_pay - c_disp,
                  c - a, e - c, (e - c) * 6.6667 / 1000.0, n_ar, n_r, n_beats_axis, w * h, bd);
-        $display("      prof: busy=%0d rvalid=%0d crop_full(d_valid&!d_ready)=%0d rd_buf_empty=%0d AR_wait_credit=%0d AR_wait_ost=%0d no_cmd_from_splitter=%0d crop_add=%0d",
+        $display("      prof: busy=%0d rvalid=%0d crop_full(d_valid&!d_ready)=%0d rd_buf_empty=%0d AR_wait_credit=%0d AR_wait_ost=%0d no_cmd_from_splitter=%0d crop_bytes=%0d",
                  p_cyc, p_rv, p_dstall, p_dempty, p_credit, p_ost, p_cvalid0, p_crop_add);
         repeat (50) @(negedge clk);
     endtask
