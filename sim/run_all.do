@@ -18,13 +18,15 @@ vlog -sv -work work -f rtl.f \
     $TB/tb_bug1_cpl_queue.sv \
     $TB/tb_bug2_sched_cpl.sv \
     $TB/tb_bug3_fbm_age.sv \
+    $TB/tb_axi_master_wr.sv \
+    $TB/tb_read_path.sv \
     $TB/u01_model.sv \
     $TB/tb_u02_top.sv \
     $TB/tb_u02_u01m.sv \
     $TB/tb_lat.sv
 
 # TB cấp khối
-foreach tb {tb_roi_desc_queue tb_page_splitter tb_bug1_cpl_queue tb_bug2_sched_cpl tb_bug3_fbm_age} {
+foreach tb {tb_roi_desc_queue tb_page_splitter tb_bug1_cpl_queue tb_bug2_sched_cpl tb_bug3_fbm_age tb_axi_master_wr tb_read_path} {
     echo "================ $tb ================"
     vsim -onfinish stop work.$tb
     run -all

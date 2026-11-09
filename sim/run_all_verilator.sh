@@ -4,7 +4,7 @@ set -e
 OPT="--binary --timing -j 8 -O2 -Wno-fatal -Wno-lint -Wno-style"
 TB=../tb
 build() { top=$1; shift; verilator $OPT --top-module $top -Mdir obj_$top -f rtl.f "$@" >/dev/null; }
-for t in tb_roi_desc_queue tb_page_splitter tb_bug1_cpl_queue tb_bug2_sched_cpl tb_bug3_fbm_age; do
+for t in tb_roi_desc_queue tb_page_splitter tb_bug1_cpl_queue tb_bug2_sched_cpl tb_bug3_fbm_age tb_axi_master_wr tb_read_path; do
     build $t $TB/$t.sv; ./obj_$t/V$t
 done
 build tb_u02_top  $TB/tb_u02_top.sv;                      ./obj_tb_u02_top/Vtb_u02_top   +FRAMES=3
