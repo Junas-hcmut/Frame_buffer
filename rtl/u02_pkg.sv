@@ -1,13 +1,11 @@
 `timescale 1ns / 1ps
 
 // =====================================================================
-// u02_pkg (bản 06/11/2026)
-// Thay đổi so với bản 156 dòng:
-//  + BURST_BYTES, FRAME_BURSTS        (isp_ingress / axi_master_wr)
-//  + wr_kind_t, u02_wr_cmd_t          (lệnh ghi isp_ingress -> axi_master_wr)
-//  + u02_row_info_t                   (row_cmd_gen -> row_info FIFO -> axis_crop)
-//  * u02_roi_cpl_t.bytes_ddr 16 -> 20 bit (ROI 128x128 dec4 đọc 184.320 B)
-//  * chú thích t_start: ghi lúc dispatch, không phải lúc AR đầu tiên
+// u02_pkg (bản thu gọn ĐA2, 25/11/2026)
+//  - 2 frame buffer (ping-pong), chỉ số buffer 1 bit (fb_idx_t)
+//  - Bỏ timestamp/deadline: descriptor 58 bit, completion 54 bit
+//  - Completion chỉ cho ROI đã được dispatch: CPL_OK hoặc CPL_BUS_ERR
+//    (ROI STALE / INVALID được đếm trong regfile, không vào hàng completion)
 // =====================================================================
 package u02_pkg;
 
@@ -24,11 +22,12 @@ package u02_pkg;
     localparam int FRAME_STRIDE_B    = 1920;      // 640 px * 3 B/px = 1920 Bytes (15 * 128B burst align)
     localparam int FRAME_SIZE_B      = 921600;    // 1920 * 480 = 921,600 Bytes / Khung
 
-    // Địa chỉ cơ sở 3 Frame Buffer trong DDR (mỗi khe 1 MB)
-    localparam int          NUM_FB        = 3;
+    // Địa chỉ cơ sở 2 Frame Buffer (ping-pong) trong DDR (mỗi khe 1 MB)
+    localparam int          NUM_FB        = 2;
+    localparam int          FB_IDX_W      = 1;
+    typedef logic [FB_IDX_W-1:0] fb_idx_t;
     localparam logic [31:0] FB0_BASE_ADDR = 32'h8000_0000;
     localparam logic [31:0] FB1_BASE_ADDR = 32'h8010_0000;
-    localparam logic [31:0] FB2_BASE_ADDR = 32'h8020_0000;
 
     // Trạng thái mỗi frame buffer (frame_buf_mgr)
     typedef enum logic [1:0] {
@@ -43,9 +42,8 @@ package u02_pkg;
     localparam int ROI_MAX_DIM       = 128;
     localparam int MAX_ROI_BYTES     = 49152;     // 128 * 128 * 3 = 49,152 Bytes (Quyết định bộ đệm U01)
 
-    // Hàng đợi ROI & timestamp
+    // Hàng đợi ROI và hàng completion
     localparam int ROI_QUEUE_DEPTH   = 16;
-    localparam int TS_WIDTH          = 48;        // @150 MHz, tràn vòng sau ~21,7 ngày
 
     // Giá trị chèn lề (Padding) & Magic Byte
     localparam logic [7:0] PAD_VAL_DEFAULT = 8'h00; // Đen = 0x00 (tương đương -128 sau lượng tử hóa)
@@ -90,11 +88,10 @@ package u02_pkg;
     } u02_header_t;
 
     // -------------------------------------------------------------
-    // 3. Descriptor nhiệm vụ ROI (Lưu trong roi_desc_queue) - 154 bit
+    // 3. Descriptor nhiệm vụ ROI (Lưu trong roi_desc_queue) - 58 bit
     // -------------------------------------------------------------
-    // Không chứa base_addr: frame_buf_mgr đổi frame_id -> địa chỉ lúc dispatch
-    // và trả CPL_STALE nếu buffer của frame đó đã bị thu hồi.
-    // t_submit do regfile ghi lúc push, đi theo descriptor tới roi_cpl_queue.
+    // Không chứa base_addr: frame_buf_mgr đổi frame_id -> địa chỉ lúc dispatch;
+    // nếu buffer của frame đó đã bị thu hồi, ROI bị bỏ (STALE, đếm trong regfile).
     typedef struct packed {
         logic signed [11:0]  roi_x;      // có dấu, cho phép tràn biên
         logic signed [11:0]  roi_y;
@@ -103,28 +100,21 @@ package u02_pkg;
         logic [1:0]          dec_log2;   // 0..2; 3 = không hợp lệ
         logic [7:0]          roi_id;
         logic [7:0]          frame_id;
-        logic [TS_WIDTH-1:0] deadline;
-        logic [TS_WIDTH-1:0] t_submit;
     } u02_roi_desc_t;
 
     // -------------------------------------------------------------
-    // 4. Completion descriptor (roi_cpl_queue) - 199 bit
+    // 4. Completion descriptor (hàng completion) - 54 bit
     // -------------------------------------------------------------
-    typedef enum logic [2:0] {
-        CPL_OK           = 3'd0,
-        CPL_DROPPED_LATE = 3'd1,   // bỏ vì quá deadline trước khi nạp
-        CPL_STALE        = 3'd2,   // buffer của frame_id đã bị thu hồi
-        CPL_INVALID      = 3'd3,   // W/H/dec ngoài khoảng cho phép
-        CPL_BUS_ERR      = 3'd4    // RRESP lỗi (SLVERR/DECERR)
+    // Chỉ ROI đã dispatch mới có completion.
+    typedef enum logic [1:0] {
+        CPL_OK      = 2'd0,
+        CPL_BUS_ERR = 2'd1     // RRESP lỗi (SLVERR/DECERR) trong lúc đọc ROI
     } cpl_status_t;
 
     typedef struct packed {
         logic [7:0]          roi_id;
         logic [7:0]          frame_id;
         cpl_status_t         status;
-        logic [TS_WIDTH-1:0] t_submit;     // lúc push vào hàng đợi (regfile)
-        logic [TS_WIDTH-1:0] t_start;      // lúc scheduler dispatch ROI (cùng chu kỳ rg_start)
-        logic [TS_WIDTH-1:0] t_end;        // chu kỳ ghi completion (bắt tay tlast)
         logic [19:0]         bytes_ddr;    // byte đọc thực tế trên AXI (= beat * 8, tối đa 184.320)
         logic [15:0]         bytes_stream; // byte payload phát sang U01 (W*H*3, tối đa 49.152)
     } u02_roi_cpl_t;
@@ -160,7 +150,7 @@ package u02_pkg;
 
     typedef struct packed {
         logic [31:0] addr;       // địa chỉ burst (căn lề 128 B)
-        logic [1:0]  buf_idx;    // frame buffer đích (0..NUM_FB-1)
+        fb_idx_t     buf_idx;    // frame buffer đích (0..NUM_FB-1)
         wr_kind_t    kind;
     } u02_wr_cmd_t;
 
@@ -168,7 +158,7 @@ package u02_pkg;
     // -------------------------------------------------------------
     // 7. Hàm tiện ích
     // -------------------------------------------------------------
-    // Kiểm tra descriptor lúc push; sai -> CPL_INVALID, không vào hàng đợi
+    // Kiểm tra descriptor lúc push; sai -> bỏ, bật cờ err_invalid, không vào hàng đợi
     function automatic logic roi_desc_valid(input u02_roi_desc_t d);
         return (d.roi_w >= 8'(ROI_MIN_DIM)) && (d.roi_w <= 8'(ROI_MAX_DIM)) &&
                (d.roi_h >= 8'(ROI_MIN_DIM)) && (d.roi_h <= 8'(ROI_MAX_DIM)) &&
@@ -192,13 +182,8 @@ package u02_pkg;
 
     // Địa chỉ cơ sở của frame buffer idx (0..NUM_FB-1); dùng hàm thay vì
     // localparam mảng để tương thích cả Icarus, Verilator và công cụ tổng hợp
-    function automatic logic [31:0] fb_base(input logic [1:0] idx);
-        case (idx)
-            2'd0:    return FB0_BASE_ADDR;
-            2'd1:    return FB1_BASE_ADDR;
-            2'd2:    return FB2_BASE_ADDR;
-            default: return FB0_BASE_ADDR;
-        endcase
+    function automatic logic [31:0] fb_base(input fb_idx_t idx);
+        return idx[0] ? FB1_BASE_ADDR : FB0_BASE_ADDR;
     endfunction
 
 endpackage

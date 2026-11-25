@@ -56,7 +56,7 @@ module tb_axi_master_wr;
     logic [63:0] wdata;
     logic [7:0]  wstrb;
     logic        commit_evt, abort_evt, bus_err_evt;
-    logic [1:0]  commit_idx, abort_idx;
+    fb_idx_t     commit_idx, abort_idx;
 
     axi_master_wr dut (.*);
 
@@ -92,7 +92,7 @@ module tb_axi_master_wr;
             r          = $urandom % 100;
             fr_abt[f]  = (r < 20);
             fr_nb[f]   = fr_abt[f] ? ($urandom % 4) : 1 + ($urandom % 12);
-            fr_idx[f]  = $urandom % 3;
+            fr_idx[f]  = $urandom % NUM_FB;
             fr_berr[f] = 1'b0;
             fr_bdone[f]= 0;
         end
@@ -106,7 +106,7 @@ module tb_axi_master_wr;
         logic [31:0] base;
         @(posedge rst_n); step();
         for (int f = 0; f < NFRAMES; f++) begin
-            base = fb_base(2'(fr_idx[f]));
+            base = fb_base(fb_idx_t'(fr_idx[f]));
             for (int k = 0; k < fr_nb[f]; k++) begin
                 for (int w = 0; w < 16; w++) begin
                     logic [63:0] d;
@@ -121,7 +121,7 @@ module tb_axi_master_wr;
                 while (cf_full) step();
                 cf_wr = 1;
                 cf_din.addr    = base + k*128;
-                cf_din.buf_idx = 2'(fr_idx[f]);
+                cf_din.buf_idx = fb_idx_t'(fr_idx[f]);
                 cf_din.kind    = (!fr_abt[f] && k == fr_nb[f]-1) ? WR_DATA_LAST : WR_DATA;
                 burst_frame.push_back(f);
                 step(); cf_wr = 0;
@@ -129,7 +129,7 @@ module tb_axi_master_wr;
             if (fr_abt[f]) begin
                 while (cf_full) step();
                 cf_wr = 1;
-                cf_din.addr = base; cf_din.buf_idx = 2'(fr_idx[f]); cf_din.kind = WR_ABORT;
+                cf_din.addr = base; cf_din.buf_idx = fb_idx_t'(fr_idx[f]); cf_din.kind = WR_ABORT;
                 step(); cf_wr = 0;
             end
             if (($urandom % 3) == 0) repeat ($urandom % 20) step();
@@ -265,7 +265,7 @@ module tb_axi_master_wr;
                              commit_evt ? "commit" : "abort", exp_commit ? "commit" : "abort",
                              fr_abt[ev_frame], fr_berr[ev_frame]);
                 end
-                if ((commit_evt ? commit_idx : abort_idx) != 2'(fr_idx[ev_frame])) begin
+                if ((commit_evt ? commit_idx : abort_idx) != fb_idx_t'(fr_idx[ev_frame])) begin
                     errors++; $display("LOI khung %0d: buf_idx sai", ev_frame);
                 end
                 if (fr_bdone[ev_frame] != fr_nb[ev_frame]) begin

@@ -4,7 +4,7 @@
 # Chạy từ thư mục sim/:
 #   ModelSim GUI : cd <repo>/sim   rồi   do run_all.do
 #   cmd Windows  : cd /d <repo>\sim  rồi  vsim -c -do run_all.do
-# (Trong Transcript của ModelSim dùng dấu / cho đường dẫn: cd D:/test/sim)
+# (Trong Transcript của ModelSim dùng dấu / cho đường dẫn)
 # Danh sách RTL theo thứ tự biên dịch: rtl.f (dùng chung với Verilator)
 # ------------------------------------------------------------------
 set TB ../tb
@@ -15,9 +15,8 @@ vlib work
 vlog -sv -work work -f rtl.f \
     $TB/tb_roi_desc_queue.sv \
     $TB/tb_page_splitter.sv \
-    $TB/tb_bug1_cpl_queue.sv \
-    $TB/tb_bug2_sched_cpl.sv \
-    $TB/tb_bug3_fbm_age.sv \
+    $TB/tb_sched_cpl.sv \
+    $TB/tb_fbm_pingpong.sv \
     $TB/tb_axi_master_wr.sv \
     $TB/tb_read_path.sv \
     $TB/u01_model.sv \
@@ -26,7 +25,7 @@ vlog -sv -work work -f rtl.f \
     $TB/tb_lat.sv
 
 # TB cấp khối
-foreach tb {tb_roi_desc_queue tb_page_splitter tb_bug1_cpl_queue tb_bug2_sched_cpl tb_bug3_fbm_age tb_axi_master_wr tb_read_path} {
+foreach tb {tb_roi_desc_queue tb_page_splitter tb_sched_cpl tb_fbm_pingpong tb_axi_master_wr tb_read_path} {
     echo "================ $tb ================"
     vsim -onfinish stop work.$tb
     run -all

@@ -24,7 +24,7 @@ module tb_lat;
     logic awready = 1, wready = 1, arready = 1;
     logic [63:0] wdata, rdata; logic [7:0] wstrb;
     logic tvalid, tlast; logic tready = 1; logic [63:0] tdata; logic [7:0] tkeep; logic [0:0] tuser;
-    logic ibuf_release = 0; logic [47:0] ts_out;
+    logic ibuf_release = 0;
 
     u02_top dut (.clk, .rst_n, .clk_isp,
         .paddr, .psel, .penable, .pwrite, .pwdata, .prdata, .pready, .pslverr, .irq,
@@ -37,7 +37,7 @@ module tb_lat;
         .m_axi_arcache(arcache), .m_axi_arprot(arprot), .m_axi_arvalid(arvalid), .m_axi_arready(arready),
         .m_axi_rid(rid), .m_axi_rdata(rdata), .m_axi_rresp(rresp), .m_axi_rlast(rlast), .m_axi_rvalid(rvalid), .m_axi_rready(rready),
         .m_axis_tvalid(tvalid), .m_axis_tready(tready), .m_axis_tdata(tdata), .m_axis_tkeep(tkeep),
-        .m_axis_tlast(tlast), .m_axis_tuser(tuser), .u01_ibuf_release(ibuf_release), .ts_out(ts_out));
+        .m_axis_tlast(tlast), .m_axis_tuser(tuser), .u01_ibuf_release(ibuf_release));
 
     int cyc = 0; always @(posedge clk) cyc <= cyc + 1;
 
@@ -106,11 +106,12 @@ module tb_lat;
     endtask
 
     // ---------------- Đo 1 ROI ----------------
-    int c_disp, c_ar, c_r, c_hdr, c_pay, n_beats_axis, n_ar, n_r;
+    int c_disp, c_end, c_ar, c_r, c_hdr, c_pay, n_beats_axis, n_ar, n_r;
     int p_cyc, p_rv, p_dstall, p_dempty, p_credit, p_ost, p_cvalid0, p_crop_add, p_crop_noadd_bytes;
     bit armed = 0;
     always @(posedge clk) if (armed) begin
         if (dut.u_sched.rg_start && c_disp < 0) c_disp = cyc;
+        if (dut.u_sched.cpl_push && c_end < 0) c_end = cyc;
         if (c_disp >= 0 && dut.u_sched.busy) begin
             p_cyc++;
             if (rvalid) p_rv++;
@@ -130,24 +131,22 @@ module tb_lat;
         end
     end
     task automatic run_roi(input int x, input int y, input int w, input int h, input int dl, input int fid, input string name);
-        logic [31:0] id, a, b, c, d, e, f, bd, bs; int k;
+        logic [31:0] id, bd, bs; int k;
         p_cyc = 0; p_rv = 0; p_dstall = 0; p_dempty = 0; p_credit = 0; p_ost = 0; p_cvalid0 = 0; p_crop_add = 0;
-        c_disp = -1; c_ar = -1; c_r = -1; c_hdr = -1; c_pay = -1; n_beats_axis = 0; n_ar = 0; n_r = 0;
+        c_disp = -1; c_end = -1; c_ar = -1; c_r = -1; c_hdr = -1; c_pay = -1; n_beats_axis = 0; n_ar = 0; n_r = 0;
         armed = 1;
         apb_wr(12'h020, {4'b0, 12'(y), 4'b0, 12'(x)});
         apb_wr(12'h024, {8'b0, 8'(h), 8'b0, 8'(w)});
         apb_wr(12'h028, {14'b0, 2'(dl), 8'(fid), 8'h11});
-        apb_wr(12'h02C, 0); apb_wr(12'h030, 0);
         apb_wr(12'h034, 1);
         k = 0;
         do begin apb_rd(12'h040, id); k++; end while (!id[31] && k < 100000);
-        apb_rd(12'h044, a); apb_rd(12'h048, b); apb_rd(12'h04C, c); apb_rd(12'h050, d);
-        apb_rd(12'h054, e); apb_rd(12'h058, f); apb_rd(12'h05C, bd); apb_rd(12'h060, bs);
+        apb_rd(12'h05C, bd); apb_rd(12'h060, bs);
         apb_wr(12'h064, 1);
         armed = 0;
-        $display("%s | st=%0d push->disp=%0d disp->AR=%0d AR->R=%0d disp->hdr=%0d disp->pay1=%0d (-1 = không có) | tstart-tsub=%0d tend-tstart=%0d (%.2f us) | AR=%0d Rbeats=%0d AXISbeats=%0d W*H=%0d bytes_ddr=%0d",
-                 name, id[18:16], c_disp - push_cyc, (c_ar < 0) ? -1 : c_ar - c_disp, (c_ar < 0) ? -1 : c_r - c_ar, c_hdr - c_disp, c_pay - c_disp,
-                 c - a, e - c, (e - c) * 6.6667 / 1000.0, n_ar, n_r, n_beats_axis, w * h, bd);
+        $display("%s | st=%0d push->disp=%0d disp->AR=%0d AR->R=%0d disp->hdr=%0d disp->pay1=%0d (-1 = không có) | disp->cpl=%0d (%.2f us) | AR=%0d Rbeats=%0d AXISbeats=%0d W*H=%0d bytes_ddr=%0d",
+                 name, id[17:16], c_disp - push_cyc, (c_ar < 0) ? -1 : c_ar - c_disp, (c_ar < 0) ? -1 : c_r - c_ar, c_hdr - c_disp, c_pay - c_disp,
+                 c_end - c_disp, (c_end - c_disp) * 6.6667 / 1000.0, n_ar, n_r, n_beats_axis, w * h, bd);
         $display("      prof: busy=%0d rvalid=%0d crop_full(d_valid&!d_ready)=%0d rd_buf_empty=%0d AR_wait_credit=%0d AR_wait_ost=%0d no_cmd_from_splitter=%0d crop_bytes=%0d",
                  p_cyc, p_rv, p_dstall, p_dempty, p_credit, p_ost, p_cvalid0, p_crop_add);
         repeat (50) @(negedge clk);

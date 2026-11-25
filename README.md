@@ -1,21 +1,20 @@
 # U02 – Frame buffer + 2D DMA (ISP → DDR → U01)
 
 Khối U02 trong pipeline camera → NPU: nhận khung VGA 640×480 RGB888 từ ISP,
-ghi vào 3 frame buffer trong DDR qua AXI4, rồi cắt các ROI (16..128 px,
+ghi vào 2 frame buffer (ping-pong) trong DDR qua AXI4, rồi cắt các ROI (16..128 px,
 decimation 1/2/4, cho phép tràn biên với padding) và phát sang U01 qua AXI4-Stream.
 Phần mềm điều khiển qua APB (hàng đợi ROI descriptor và hàng completion).
 
 ## Cấu trúc thư mục
 
 ```
-rtl/                  17 file tổng hợp được, top = u02_top (thứ tự biên dịch: sim/rtl.f)
+rtl/                  16 file tổng hợp được, top = u02_top (thứ tự biên dịch: sim/rtl.f)
   u02_pkg.sv          tham số, struct (descriptor, completion, header, row_info, wr_cmd)
   u02_top.sv          top
   regfile.sv          thanh ghi APB – docs/u02_registers.md
-  u02_scheduler.sv    chọn ROI, deadline, credit bộ đệm U01
+  u02_scheduler.sv    phục vụ ROI theo FIFO, bỏ ROI STALE, credit bộ đệm U01
   roi_desc_queue.sv   hàng đợi ROI descriptor
-  roi_cpl_queue.sv    hàng đợi completion (giữ chỗ cho ROI đang chạy)
-  frame_buf_mgr.sv    3 frame buffer FREE/WRITING/READY/READING, age matrix
+  frame_buf_mgr.sv    2 frame buffer FREE/WRITING/READY/READING, bit newest
   isp_ingress.sv      clk_isp → clk_sys, đóng burst ghi 128 B
   axi_master_wr.sv    AXI4 write master, commit/abort khung theo BRESP
   row_cmd_gen.sv      tách ROI thành lệnh đọc theo hàng (lead pad / valid / trail pad)
@@ -30,7 +29,8 @@ tb/
   read_roi.py         đọc file ROI .hex do u01_model xuất (+U01_DUMP)
   tb_read_path.sv     nhánh đọc row_cmd_gen → axis_crop so với mô hình vàng độc lập
   tb_axi_master_wr.sv AXI write master với slave ngẫu nhiên, tiêm BRESP lỗi, slave chờ WVALID
-  tb_bug1..3_*.sv     hồi quy cho lỗi 1–3 (review 06/11/2026)
+  tb_sched_cpl.sv     scheduler + hàng completion: 20 000 ROI, phần mềm lấy completion chậm
+  tb_fbm_pingpong.sv  frame_buf_mgr 2 buffer: thu hồi khung cũ hơn, không đọc khung ghi dở
   tb_page_splitter.sv, tb_roi_desc_queue.sv
 sim/                  rtl.f, run_all.do (ModelSim/Questa), run_all_verilator.sh, run_legacy.do
 docs/                 bản đồ thanh ghi, ghi chú review
@@ -43,7 +43,7 @@ legacy/da1/           khối và TB thời ĐA1 – KHÔNG khớp u02_top hiện
 |---|---|
 | APB4 slave | cấu hình, nạp ROI descriptor, đọc completion – [docs/u02_registers.md](docs/u02_registers.md) |
 | ISP (clk_isp) | `isp_valid`, `isp_data[23:0]` = {B, G, R}, `isp_sof`, `isp_eol`; không backpressure |
-| AXI4 master | 64 bit, 1 ID, burst ≤ 16 beat, ≤ 4 burst chờ mỗi chiều; FB0/1/2 tại 0x8000_0000 / 0x8010_0000 / 0x8020_0000 |
+| AXI4 master | 64 bit, 1 ID, burst ≤ 16 beat, ≤ 4 burst chờ mỗi chiều; FB0/1 tại 0x8000_0000 / 0x8010_0000 |
 | AXI4-Stream | mỗi ROI: 1 beat header (`tuser = 1`), rồi W×H×3 byte RGB (HWC) liền nhau, `tlast` ở beat cuối |
 | `u01_ibuf_release` | U01 trả 1 credit bộ đệm đầu vào |
 
@@ -58,6 +58,10 @@ Verilator 5.x: `cd sim && ./run_all_verilator.sh`.
 
 ## Lịch sử
 
+- **Bản thu gọn ĐA2 (nhánh `lite`)** – để vừa khối lượng nhóm 2 người: bỏ timestamp
+  48 bit và deadline; bỏ `roi_cpl_queue` (hàng completion là `sync_fifo`, chỉ
+  scheduler ghi; ROI STALE/INVALID đếm ở DROP_CNT/DROP_LAST); về 2 buffer ping-pong
+  (`newest` thay age matrix); bỏ `sync_fifo.WR_THRU`. Ba tính năng này để cho DATN.
 - **Review 06/11/2026** – [docs/u02_review_2026-11-06.md](docs/u02_review_2026-11-06.md).
   Commit *"Add regression TBs for bugs 1-3"* chứa TB chạy trên RTL gốc (FAIL),
   commit kế tiếp sửa RTL (PASS):
@@ -87,6 +91,6 @@ mạch nén byte – cần đối chiếu diện tích khi tổng hợp (mục E
 
 ## Việc còn mở
 
-Xem danh sách A1–A7, B1–B8, C, D, E trong ghi chú dự án. Chính: deadline tuyệt
-đối 48 bit ở driver (A1), frame_id 8 bit (A2), push khi đầy không có completion (A3),
-2 buffer WRITING khi abort (A4). A5 (throughput axis_crop) đã xử lý – bảng trên.
+Xem danh sách trong ghi chú dự án. Chính: frame_id 8 bit (A2), push khi hàng đầy
+chưa ghi vào DROP_LAST (A3), khung mới bị bỏ khi abort/SOF sớm trong lúc buffer kia
+đang được đọc (A4). A5 (throughput axis_crop) đã xử lý – bảng trên.

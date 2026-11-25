@@ -36,8 +36,6 @@ module tb_roi_desc_queue;
         d.dec_log2 = 2'(s % 3);
         d.roi_id   = 8'(s);
         d.frame_id = 8'(s >> 3);
-        d.deadline = 48'(s) * 48'd1000;
-        d.t_submit = 48'(s);
         return d;
     endfunction
 

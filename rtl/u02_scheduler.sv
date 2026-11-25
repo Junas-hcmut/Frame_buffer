@@ -1,27 +1,23 @@
 `timescale 1ns / 1ps
 
 // =====================================================================
-// u02_scheduler (ĐA2): phục vụ ROI theo thứ tự FIFO, mỗi lúc 1 ROI.
+// u02_scheduler (ĐA2, bản thu gọn): phục vụ ROI theo thứ tự FIFO, mỗi lúc 1 ROI.
 //
-// Với ROI ở đầu hàng đợi (khi cfg_enable = 1 và roi_cpl_queue báo cpl_room):
-//  1. deadline != 0 và đã quá hạn           -> CPL_DROPPED_LATE
-//  2. frame_id không còn READY/READING       -> CPL_STALE
-//  3. U01 chưa có credit bộ đệm đầu vào      -> chờ
-//  4. còn lại: chiếm frame, khởi động row_cmd_gen, trừ 1 credit
+// Với ROI ở đầu hàng đợi (khi cfg_enable = 1):
+//  1. frame_id không còn READY/READING        -> bỏ ROI (STALE): xung stale_evt
+//  2. hàng completion đầy hoặc U01 hết credit -> chờ
+//  3. còn lại: chiếm frame, khởi động row_cmd_gen, trừ 1 credit
 // Kết thúc khi axis_crop báo beat tlast đã được U01 nhận -> ghi completion
 // (OK hoặc BUS_ERR), nhả frame.
+//
+// Không mất completion: chỉ dispatch khi hàng completion chưa đầy. Từ lúc
+// dispatch tới lúc kết thúc, scheduler là nguồn ghi duy nhất của hàng
+// completion (ghi đúng 1 entry lúc kết thúc), phần mềm chỉ có thể lấy bớt,
+// nên lúc kết thúc hàng luôn còn chỗ.
+//
 // Credit: dùng = số header đã phát - số xung ibuf_release; có thể phát khi
 // dùng < cfg_ibuf_n.
-// Điểm mở rộng cho DATN: thay bước chọn ROI đầu hàng bằng EDF.
-//
-// Giao thức với roi_cpl_queue (sửa lỗi 2, review 06/11/2026):
-//  - Chỉ drop hoặc dispatch khi cpl_room = 1 -> drop luôn có chỗ ghi.
-//  - cpl_rsv = 1 từ chu kỳ dispatch tới hết chu kỳ finish: hàng completion
-//    giữ 1 chỗ cho ROI đang chạy, CPL_INVALID từ regfile không được lấy
-//    chỗ này. Nhờ vậy completion lúc finish (xung 1 chu kỳ, không chờ
-//    được) không bao giờ bị mất.
-//  - Bản cũ: can_eval chỉ kiểm !cpl_full lúc dispatch; INVALID đến trong
-//    lúc ROI chạy có thể làm đầy hàng -> completion OK bị bỏ.
+// Điểm mở rộng cho DATN: deadline, timestamp và chọn ROI theo EDF.
 // =====================================================================
 module u02_scheduler
     import u02_pkg::*;
@@ -30,7 +26,6 @@ module u02_scheduler
     input  logic                 rst_n,
     input  logic                 cfg_enable,
     input  logic [3:0]           cfg_ibuf_n,
-    input  logic [TS_WIDTH-1:0]  ts_now,
 
     // roi_desc_queue (FWFT)
     input  logic                 q_valid,
@@ -40,10 +35,10 @@ module u02_scheduler
     // frame_buf_mgr
     output logic [7:0]           lookup_fid,
     input  logic                 lookup_hit,
-    input  logic [1:0]           lookup_idx,
+    input  fb_idx_t              lookup_idx,
     output logic                 acq_req,
     output logic                 rel_evt,
-    output logic [1:0]           rel_idx,
+    output fb_idx_t              rel_idx,
 
     // row_cmd_gen
     output logic                 rg_start,
@@ -61,11 +56,15 @@ module u02_scheduler
     // U01
     input  logic                 ibuf_release,
 
-    // Completion
+    // Hàng completion
     output logic                 cpl_push,
     output u02_roi_cpl_t         cpl,
-    input  logic                 cpl_room,       // roi_cpl_queue.a_room
-    output logic                 cpl_rsv,        // roi_cpl_queue.rsv_a
+    input  logic                 cpl_full,
+
+    // ROI bị bỏ vì frame đã bị thu hồi
+    output logic                 stale_evt,
+    output logic [7:0]           stale_roi_id,
+    output logic [7:0]           stale_frame_id,
 
     output logic                 busy,
     output logic                 done_evt
@@ -75,65 +74,50 @@ module u02_scheduler
     st_t st;
 
     u02_roi_desc_t       cur;
-    logic [1:0]          cur_idx;
-    logic [TS_WIDTH-1:0] t_start;        // ts lúc dispatch
+    fb_idx_t             cur_idx;
     logic [4:0]          used;           // credit đang dùng
 
-    wire late      = (q_desc.deadline != '0) && ($signed(ts_now - q_desc.deadline) > 0);
-    wire credit_ok = (used < {1'b0, cfg_ibuf_n});
-    wire can_eval  = (st == S_IDLE) && cfg_enable && q_valid && cpl_room;
+    wire credit_ok  = (used < {1'b0, cfg_ibuf_n});
+    wire head_ok    = (st == S_IDLE) && cfg_enable && q_valid;
 
-    wire drop_late = can_eval && late;
-    wire drop_stale= can_eval && !late && !lookup_hit;
-    wire dispatch  = can_eval && !late && lookup_hit && credit_ok;
+    wire drop_stale = head_ok && !lookup_hit;
+    wire dispatch   = head_ok && lookup_hit && credit_ok && !cpl_full;
 
-    assign lookup_fid   = q_desc.frame_id;
-    assign acq_req      = dispatch;
-    assign q_pop        = drop_late || drop_stale || dispatch;
-    assign rg_start     = dispatch;
-    assign rg_desc      = q_desc;
-    assign rg_base      = fb_base(lookup_idx);
-    assign rd_cnt_clear = dispatch;
-    assign busy         = (st == S_RUN);
-    assign cpl_rsv      = (st == S_RUN) || dispatch;     // ROI nợ 1 completion
+    assign lookup_fid     = q_desc.frame_id;
+    assign acq_req        = dispatch;
+    assign q_pop          = drop_stale || dispatch;
+    assign rg_start       = dispatch;
+    assign rg_desc        = q_desc;
+    assign rg_base        = fb_base(lookup_idx);
+    assign rd_cnt_clear   = dispatch;
+    assign busy           = (st == S_RUN);
 
-    // Completion (tổ hợp, đẩy trong chu kỳ quyết định)
+    assign stale_evt      = drop_stale;
+    assign stale_roi_id   = q_desc.roi_id;
+    assign stale_frame_id = q_desc.frame_id;
+
+    // Completion (tổ hợp, đẩy trong chu kỳ kết thúc)
     wire finish = (st == S_RUN) && roi_done;
 
     always_comb begin
-        cpl      = '0;
-        cpl_push = 1'b0;
-        if (drop_late || drop_stale) begin
-            cpl_push       = 1'b1;
-            cpl.roi_id     = q_desc.roi_id;
-            cpl.frame_id   = q_desc.frame_id;
-            cpl.status     = drop_late ? CPL_DROPPED_LATE : CPL_STALE;
-            cpl.t_submit   = q_desc.t_submit;
-            cpl.t_start    = ts_now;
-            cpl.t_end      = ts_now;
-        end else if (finish) begin
-            cpl_push          = 1'b1;
-            cpl.roi_id        = cur.roi_id;
-            cpl.frame_id      = cur.frame_id;
-            cpl.status        = roi_err ? CPL_BUS_ERR : CPL_OK;
-            cpl.t_submit      = cur.t_submit;
-            cpl.t_start       = t_start;
-            cpl.t_end         = ts_now;
-            cpl.bytes_ddr     = {rd_beat_cnt[16:0], 3'b000};       // beat * 8
-            cpl.bytes_stream  = 16'(cur.roi_w * cur.roi_h * PIXEL_BYTES);
-        end
+        cpl              = '0;
+        cpl.roi_id       = cur.roi_id;
+        cpl.frame_id     = cur.frame_id;
+        cpl.status       = roi_err ? CPL_BUS_ERR : CPL_OK;
+        cpl.bytes_ddr    = {rd_beat_cnt[16:0], 3'b000};       // beat * 8
+        cpl.bytes_stream = 16'(cur.roi_w * cur.roi_h * PIXEL_BYTES);
     end
+    assign cpl_push = finish;
 
     assign rel_evt  = finish;
     assign rel_idx  = cur_idx;
-    assign done_evt = cpl_push;
+    assign done_evt = finish;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st      <= S_IDLE;
             cur     <= '0;
             cur_idx <= '0;
-            t_start <= '0;
             used    <= '0;
         end else begin
             case (st)
@@ -141,7 +125,6 @@ module u02_scheduler
                     st      <= S_RUN;
                     cur     <= q_desc;
                     cur_idx <= lookup_idx;
-                    t_start <= ts_now;
                 end
                 S_RUN:  if (roi_done) st <= S_IDLE;
                 default: st <= S_IDLE;
@@ -155,5 +138,10 @@ module u02_scheduler
             endcase
         end
     end
+
+    // synopsys translate_off
+    always @(posedge clk) if (rst_n && cpl_push && cpl_full)
+        $error("u02_scheduler: hang completion day luc ket thuc ROI -> mat completion");
+    // synopsys translate_on
 
 endmodule

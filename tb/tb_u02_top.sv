@@ -5,8 +5,8 @@
 //  - Mô hình DDR AXI4 slave: 1 bộ nhớ chung, trễ 20-40 chu kỳ, READY ngẫu nhiên
 //      +AW_WAIT_W : slave chỉ bật AWREADY khi đã thấy WVALID (hợp lệ theo AXI4 A3.3.1)
 //  - Mô hình U01: TREADY ngẫu nhiên, kiểm header + payload từng byte, phát ibuf_release
-//  - CPU qua APB: đẩy ROI ngẫu nhiên (tràn biên, dec 1/2/4, ROI sai, frame cũ, deadline)
-//    và đọc completion; đối chiếu trạng thái với dữ liệu nhận được.
+//  - CPU qua APB: đẩy ROI ngẫu nhiên (tràn biên, dec 1/2/4, ROI sai, frame cũ)
+//    và đọc completion; ROI bị bỏ (STALE / INVALID) đối chiếu qua DROP_CNT / DROP_LAST.
 //  - Kiểm tra giao thức: AW/AR/W/AXIS giữ ổn định khi bị chặn, 4 KB, WLAST, TKEEP, TUSER.
 //  Tham số: +FRAMES=n  +AW_WAIT_W  +TREADY_ALWAYS  +IBUF_N=n  +PADVAL=hh
 // =====================================================================
@@ -24,7 +24,7 @@ module tb_u02_top;
     logic awvalid, awready, wvalid, wready, wlast, bvalid, bready, arvalid, arready, rvalid, rready, rlast;
     logic [63:0] wdata, rdata; logic [7:0] wstrb;
     logic tvalid, tready, tlast; logic [63:0] tdata; logic [7:0] tkeep; logic [0:0] tuser;
-    logic ibuf_release = 0; logic [47:0] ts_out;
+    logic ibuf_release = 0;
 
     u02_top dut (.clk, .rst_n, .clk_isp,
         .paddr, .psel, .penable, .pwrite, .pwdata, .prdata, .pready, .pslverr, .irq,
@@ -37,7 +37,7 @@ module tb_u02_top;
         .m_axi_arcache(arcache), .m_axi_arprot(arprot), .m_axi_arvalid(arvalid), .m_axi_arready(arready),
         .m_axi_rid(rid), .m_axi_rdata(rdata), .m_axi_rresp(rresp), .m_axi_rlast(rlast), .m_axi_rvalid(rvalid), .m_axi_rready(rready),
         .m_axis_tvalid(tvalid), .m_axis_tready(tready), .m_axis_tdata(tdata), .m_axis_tkeep(tkeep),
-        .m_axis_tlast(tlast), .m_axis_tuser(tuser), .u01_ibuf_release(ibuf_release), .ts_out(ts_out));
+        .m_axis_tlast(tlast), .m_axis_tuser(tuser), .u01_ibuf_release(ibuf_release));
 
     // ---------------- Cấu hình ----------------
     int  N_FRAMES = 6, IBUF_N = 1; bit AW_WAIT_W = 0, TREADY_ALWAYS = 0; logic [7:0] PADV = 8'h00;
@@ -163,10 +163,25 @@ module tb_u02_top;
     endtask
 
     // ---------------- Bảng ROI đã gửi ----------------
-    typedef struct { int x, y, w, h, dl, fid; logic [47:0] deadline; int kind; bit got_pkt, pkt_ok, done; } roi_t;
-    // kind: 0 = bình thường, 1 = sai (W/dec), 2 = frame cũ (STALE chắc chắn), 3 = deadline gấp
+    typedef struct { int x, y, w, h, dl, fid; int kind; bit got_pkt, pkt_ok, done; } roi_t;
+    // kind: 0 = bình thường, 1 = sai (W/dec), 2 = frame cũ (STALE chắc chắn)
     roi_t rois [int];
-    int n_sent = 0, n_cpl = 0, st_cnt [8], stale_normal = 0;
+    int n_sent = 0, n_cpl = 0, st_cnt [4], n_stale = 0, stale_normal = 0, n_invalid = 0;
+
+    // ROI bị scheduler bỏ vì frame đã bị thu hồi: quan sát xung stale_evt
+    always @(posedge clk) if (rst_n && dut.u_sched.stale_evt) begin
+        int id_; roi_t r;
+        id_ = int'(dut.u_sched.stale_roi_id);
+        n_stale++;
+        if (!rois.exists(id_)) err($sformatf("STALE của roi %0d lạ", id_));
+        else begin
+            r = rois[id_];
+            if (r.done) err($sformatf("roi %0d STALE sau khi đã có kết quả", id_));
+            if (r.kind == 1) err($sformatf("roi %0d sai mà lại vào hàng đợi", id_));
+            if (r.kind == 0) stale_normal++;
+            r.done = 1; rois[id_] = r;
+        end
+    end
 
     // ---------------- Mô hình U01 ----------------
     logic [7:0] pkt[$]; logic [63:0] hdr; bit in_pkt = 0; int beat_i = 0;
@@ -236,31 +251,31 @@ module tb_u02_top;
             default: begin r.x = $urandom_range(0, 1000) - 300; r.y = $urandom_range(0, 800) - 200; end
         endcase
         r.w = $urandom_range(16, 128); r.h = $urandom_range(16, 128); r.dl = $urandom_range(0, 2);
-        r.fid = fid; r.deadline = 0;
+        r.fid = fid;
         if (kind == 1) begin if ($urandom_range(0,1)) r.w = 15; else r.dl = 3; end
         if (kind == 2) r.fid = (fid + 256 - 5) % 256;
-        if (kind == 3) begin
-            apb_rd(12'h038, lo); apb_rd(12'h03C, hi);
-            r.deadline = {hi[15:0], lo} + 48'($urandom_range(200, 20000));
-        end
         rois[rid_] = r;
         if ($test$plusargs("DBG")) $display("[%0t] push roi=%0d kind=%0d x=%0d y=%0d W=%0d H=%0d dec=%0d fid=%0d", $time, rid_, kind, r.x, r.y, r.w, r.h, 1<<r.dl, r.fid);
         apb_wr(12'h020, {4'b0, 12'(r.y), 4'b0, 12'(r.x)});
         apb_wr(12'h024, {8'b0, 8'(r.h), 8'b0, 8'(r.w)});
         apb_wr(12'h028, {14'b0, 2'(r.dl), 8'(r.fid), 8'(rid_)});
-        apb_wr(12'h02C, r.deadline[31:0]);
-        apb_wr(12'h030, {16'b0, r.deadline[47:32]});
         apb_wr(12'h034, 32'h1);
         n_sent++;
+        if (kind == 1) begin
+            // descriptor sai: bị từ chối ngay, ghi vào DROP_LAST
+            apb_rd(12'h088, lo);
+            if (!lo[31] || !lo[16] || lo[7:0] != 8'(rid_) || lo[15:8] != 8'(r.fid))
+                err($sformatf("DROP_LAST sau ROI sai %0d = %h", rid_, lo));
+            r.done = 1; rois[rid_] = r; n_invalid++;
+        end
     endtask
 
     task automatic drain_cpl();
-        logic [31:0] id, a, b, c, d, e, f, bd, bs; int rid_, st; roi_t r;
+        logic [31:0] id, bd, bs; int rid_, st; roi_t r;
         apb_rd(12'h040, id);
         while (id[31]) begin
-            rid_ = int'(id[7:0]); st = int'(id[18:16]);
-            apb_rd(12'h044, a); apb_rd(12'h048, b); apb_rd(12'h04C, c); apb_rd(12'h050, d);
-            apb_rd(12'h054, e); apb_rd(12'h058, f); apb_rd(12'h05C, bd); apb_rd(12'h060, bs);
+            rid_ = int'(id[7:0]); st = int'(id[17:16]);
+            apb_rd(12'h05C, bd); apb_rd(12'h060, bs);
             apb_wr(12'h064, 32'h1);
             n_cpl++; st_cnt[st]++;
             if (!rois.exists(rid_)) err($sformatf("completion của roi %0d lạ", rid_));
@@ -273,23 +288,12 @@ module tb_u02_top;
                         if (r.kind == 1 || r.kind == 2) err($sformatf("roi %0d (kind %0d) lẽ ra không OK", rid_, r.kind));
                         if (!r.got_pkt) err($sformatf("roi %0d OK nhưng U01 chưa nhận gói", rid_));
                         if (bs != 32'(r.w*r.h*3)) err($sformatf("roi %0d bytes_stream=%0d", rid_, bs));
-                        if (r.deadline != 0 && {d[15:0], c} > r.deadline) err("OK nhưng bắt đầu sau deadline");
                     end
-                    1: begin   // DROPPED_LATE
-                        if (r.deadline == 0) err($sformatf("roi %0d LATE nhưng không có deadline", rid_));
-                        if ({d[15:0], c} <= r.deadline) err("LATE nhưng t_start chưa quá hạn");
-                    end
-                    2: if (r.kind != 2) begin
-                           // STALE của ROI bình thường: chấp nhận nhưng đếm riêng
-                           stale_normal++;
-                       end
-                    3: if (r.kind != 1) err($sformatf("roi %0d INVALID nhưng descriptor đúng", rid_));
+                    1: ;       // BUS_ERR (mô hình DDR không sinh lỗi -> không mong đợi)
                     default: err($sformatf("roi %0d status %0d", rid_, st));
                 endcase
-                if (r.kind == 1 && st != 3) err($sformatf("roi %0d sai mà status=%0d", rid_, st));
-                if (r.kind == 2 && st != 2) err($sformatf("roi %0d frame cũ mà status=%0d", rid_, st));
+                if (st == 1) err($sformatf("roi %0d BUS_ERR không mong đợi", rid_));
                 if (st != 0 && r.got_pkt) err($sformatf("roi %0d status %0d nhưng U01 lại nhận gói", rid_, st));
-                if (!({b[15:0], a} <= {d[15:0], c} && {d[15:0], c} <= {f[15:0], e})) err("thứ tự timestamp sai");
                 rois[rid_] = r;
             end
             apb_rd(12'h040, id);
@@ -305,7 +309,7 @@ module tb_u02_top;
         TREADY_ALWAYS = $test$plusargs("TREADY_ALWAYS");
         paddr = 0;
         repeat (10) @(negedge clk); rst_n = 1; repeat (10) @(negedge clk);
-        apb_rd(12'h010, v); if (v != 32'h0110_8010) err($sformatf("CAP = %h", v));
+        apb_rd(12'h010, v); if (v != 32'h0210_8010) err($sformatf("CAP = %h", v));
         apb_wr(12'h00C, {24'b0, PADV});
         apb_wr(12'h014, 32'(IBUF_N));
         apb_wr(12'h004, 32'h7F);
@@ -321,7 +325,7 @@ module tb_u02_top;
                     nb = $urandom_range(1, 6);
                     for (int k = 0; k < nb; k++) begin
                         int p; p = $urandom_range(0, 99);
-                        kind = (p < 70) ? 0 : (p < 80) ? 1 : (p < 88) ? 2 : 3;
+                        kind = (p < 75) ? 0 : (p < 87) ? 1 : 2;
                         apb_rd(12'h004, v);
                         if (!v[2]) begin push_roi(fid, kind, rid_ % 256); rid_++; end
                     end
@@ -336,14 +340,17 @@ module tb_u02_top;
         begin
             int lost; lost = 0;
             foreach (rois[i]) if (!rois[i].done) lost++;
-            if (lost) err($sformatf("%0d ROI không có completion", lost));
+            if (lost) err($sformatf("%0d ROI không có kết quả (completion / STALE / INVALID)", lost));
         end
+        apb_rd(12'h084, v);
+        if (v[15:0] != 16'(n_stale) || v[31:16] != 16'(n_invalid))
+            err($sformatf("DROP_CNT = %h, mong đợi STALE=%0d INVALID=%0d", v, n_stale, n_invalid));
         apb_rd(12'h074, v);
         $display("------------------------------------------------------------");
         $display("tb_u02_top: khung ISP=%0d commit=%0d abort=%0d | ROI gửi=%0d completion=%0d",
                  N_FRAMES, v[15:0], v[31:16], n_sent, n_cpl);
-        $display("  OK=%0d LATE=%0d STALE=%0d (trong đó ROI thường bị STALE=%0d) INVALID=%0d BUS_ERR=%0d",
-                 st_cnt[0], st_cnt[1], st_cnt[2], stale_normal, st_cnt[3], st_cnt[4]);
+        $display("  OK=%0d BUS_ERR=%0d | bị bỏ: STALE=%0d (trong đó ROI thường bị STALE=%0d) INVALID=%0d",
+                 st_cnt[0], st_cnt[1], n_stale, stale_normal, n_invalid);
         $display("  LỖI = %0d %s", errors, errors == 0 ? "-> PASS" : "-> FAIL");
         $display("------------------------------------------------------------");
         $finish;

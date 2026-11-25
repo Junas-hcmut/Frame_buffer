@@ -10,14 +10,13 @@
 //              row_cmd_gen -> page_splitter -> axi_master_rd --> AXI AR/R
 //              row_cmd_gen -> row_info FIFO --+
 //              axi_master_rd ------------------+-> axis_crop -> AXIS -> U01
-//              axis_crop (roi_done) -> u02_scheduler -> roi_cpl_queue -> regfile
+//              axis_crop (roi_done) -> u02_scheduler -> hàng completion (sync_fifo) -> regfile
 //
 //  Một cổng AXI4 master (ghi và đọc độc lập theo kênh), 1 ID.
 //  Mọi khối chạy trên clk (clk_sys) trừ phần đầu của isp_ingress.
 //
-//  06/11/2026: nối giao thức giữ chỗ completion mới
-//  (u02_scheduler.cpl_rsv -> roi_cpl_queue.rsv_a, roi_cpl_queue.a_room ->
-//  u02_scheduler.cpl_room) thay cho cpl_full.
+//  Bản thu gọn ĐA2 (25/11/2026): 2 frame buffer ping-pong, không timestamp /
+//  deadline, hàng completion là FIFO thường (chỉ ROI đã dispatch).
 // =====================================================================
 module u02_top
     import u02_pkg::*;
@@ -85,22 +84,12 @@ module u02_top
     output logic [AXIS_KEEP_WIDTH-1:0]    m_axis_tkeep,
     output logic                          m_axis_tlast,
     output logic [0:0]                    m_axis_tuser,
-    input  logic                          u01_ibuf_release,
-
-    // ---------------- Timestamp chung ----------------
-    output logic [TS_WIDTH-1:0]           ts_out
+    input  logic                          u01_ibuf_release
 );
 
     // =================================================================
-    // Timestamp & reset miền ISP
+    // Reset miền ISP
     // =================================================================
-    logic [TS_WIDTH-1:0] ts;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) ts <= '0;
-        else        ts <= ts + 1'b1;
-    end
-    assign ts_out = ts;
-
     logic rst_isp_n;
     rst_sync u_rst_isp (.clk(clk_isp), .arst_n(rst_n), .rst_n(rst_isp_n));
 
@@ -111,7 +100,7 @@ module u02_top
     logic                               cfg_enable, cfg_cap_enable;
     logic [7:0]                         cfg_pad_val;
     logic [3:0]                         cfg_ibuf_n;
-    logic                               rf_q_push, rf_q_invalid;
+    logic                               rf_q_push;
     u02_roi_desc_t                      rf_q_desc;
 
     // roi_desc_queue
@@ -119,21 +108,22 @@ module u02_top
     u02_roi_desc_t                      q_head;
     logic [$clog2(ROI_QUEUE_DEPTH):0]   q_count;
 
-    // roi_cpl_queue
-    logic                               sch_cpl_push, cpl_pop, cpl_valid, cpl_full, cpl_ovf;
-    logic                               sch_cpl_rsv, cpl_room;
-    u02_roi_cpl_t                       sch_cpl, inv_cpl, cpl_head;
+    // hàng completion
+    logic                               sch_cpl_push, cpl_pop, cpl_valid, cpl_empty, cpl_full;
+    u02_roi_cpl_t                       sch_cpl, cpl_head;
     logic [$clog2(ROI_QUEUE_DEPTH):0]   cpl_count;
+    logic                               sch_stale;
+    logic [7:0]                         sch_stale_roi, sch_stale_fid;
 
     // frame_buf_mgr
     logic                               fb_alloc_req, fb_alloc_ok;
-    logic [1:0]                         fb_alloc_idx;
+    fb_idx_t                            fb_alloc_idx;
     logic [7:0]                         fb_alloc_fid;
     logic                               fb_commit, fb_abort;
-    logic [1:0]                         fb_commit_idx, fb_abort_idx;
+    fb_idx_t                            fb_commit_idx, fb_abort_idx;
     logic [7:0]                         fb_lookup_fid, fb_latest_fid;
     logic                               fb_lookup_hit, fb_acq, fb_rel, fb_latest_valid;
-    logic [1:0]                         fb_lookup_idx, fb_rel_idx;
+    fb_idx_t                            fb_lookup_idx, fb_rel_idx;
     logic [15:0]                        fb_cnt_committed, fb_cnt_aborted, fb_cnt_recycled, fb_cnt_denied;
 
     // scheduler
@@ -190,10 +180,11 @@ module u02_top
         .prdata(prdata), .pready(pready), .pslverr(pslverr),
         .cfg_enable(cfg_enable), .cfg_cap_enable(cfg_cap_enable),
         .cfg_pad_val(cfg_pad_val), .cfg_ibuf_n(cfg_ibuf_n),
-        .q_push(rf_q_push), .q_desc(rf_q_desc), .q_overflow(q_overflow), .q_invalid(rf_q_invalid),
+        .q_push(rf_q_push), .q_desc(rf_q_desc), .q_overflow(q_overflow),
         .q_full(q_full), .q_empty(q_empty), .q_count(q_count),
-        .hw_busy(sch_busy), .hw_done(sch_done), .ts_now(ts),
-        .cpl_valid(cpl_valid), .cpl_head(cpl_head), .cpl_count(cpl_count), .cpl_pop(cpl_pop), .cpl_ovf(cpl_ovf),
+        .hw_busy(sch_busy), .hw_done(sch_done),
+        .stale_evt(sch_stale), .stale_roi_id(sch_stale_roi), .stale_frame_id(sch_stale_fid),
+        .cpl_valid(cpl_valid), .cpl_head(cpl_head), .cpl_count(cpl_count), .cpl_pop(cpl_pop),
         .fb_latest_fid(fb_latest_fid), .fb_latest_valid(fb_latest_valid),
         .fb_cnt_committed(fb_cnt_committed), .fb_cnt_aborted(fb_cnt_aborted),
         .fb_cnt_recycled(fb_cnt_recycled), .fb_cnt_denied(fb_cnt_denied),
@@ -208,24 +199,13 @@ module u02_top
         .empty(q_empty), .full(q_full), .almost_full(q_afull), .count(q_count)
     );
 
-    // Completion cho descriptor sai (từ regfile)
-    always_comb begin
-        inv_cpl          = '0;
-        inv_cpl.roi_id   = rf_q_desc.roi_id;
-        inv_cpl.frame_id = rf_q_desc.frame_id;
-        inv_cpl.status   = CPL_INVALID;
-        inv_cpl.t_submit = rf_q_desc.t_submit;
-        inv_cpl.t_start  = ts;
-        inv_cpl.t_end    = ts;
-    end
-
-    roi_cpl_queue u_cpl_q (
+    // Hàng completion: FIFO thường, chỉ scheduler ghi (1 entry mỗi ROI đã dispatch)
+    sync_fifo #(.DW($bits(u02_roi_cpl_t)), .DEPTH(ROI_QUEUE_DEPTH)) u_cpl_q (
         .clk(clk), .rst_n(rst_n),
-        .push_a(sch_cpl_push), .din_a(sch_cpl), .rsv_a(sch_cpl_rsv), .a_room(cpl_room),
-        .push_b(rf_q_invalid), .din_b(inv_cpl),
-        .pop(cpl_pop), .dout(cpl_head), .valid(cpl_valid), .full(cpl_full), .count(cpl_count),
-        .ovf_evt(cpl_ovf)
+        .wr_en(sch_cpl_push), .wr_data(sch_cpl), .full(cpl_full),
+        .rd_en(cpl_pop), .rd_data(cpl_head), .empty(cpl_empty), .count(cpl_count)
     );
+    assign cpl_valid = !cpl_empty;
 
     frame_buf_mgr u_fbm (
         .clk(clk), .rst_n(rst_n),
@@ -240,7 +220,7 @@ module u02_top
 
     u02_scheduler u_sched (
         .clk(clk), .rst_n(rst_n),
-        .cfg_enable(cfg_enable), .cfg_ibuf_n(cfg_ibuf_n), .ts_now(ts),
+        .cfg_enable(cfg_enable), .cfg_ibuf_n(cfg_ibuf_n),
         .q_valid(q_valid), .q_desc(q_head), .q_pop(q_pop),
         .lookup_fid(fb_lookup_fid), .lookup_hit(fb_lookup_hit), .lookup_idx(fb_lookup_idx),
         .acq_req(fb_acq), .rel_evt(fb_rel), .rel_idx(fb_rel_idx),
@@ -248,7 +228,8 @@ module u02_top
         .roi_done(roi_done), .roi_err(roi_err),
         .rd_cnt_clear(rd_cnt_clear), .rd_beat_cnt(rd_beat_cnt),
         .ibuf_release(u01_ibuf_release),
-        .cpl_push(sch_cpl_push), .cpl(sch_cpl), .cpl_room(cpl_room), .cpl_rsv(sch_cpl_rsv),
+        .cpl_push(sch_cpl_push), .cpl(sch_cpl), .cpl_full(cpl_full),
+        .stale_evt(sch_stale), .stale_roi_id(sch_stale_roi), .stale_frame_id(sch_stale_fid),
         .busy(sch_busy), .done_evt(sch_done)
     );
 
@@ -333,7 +314,7 @@ module u02_top
     );
 
     // Tín hiệu chỉ để quan sát / dành cho mở rộng
-    wire unused = ^{q_push_ok, q_afull, fb_alloc_fid, cpl_full, rg_busy, ps_roi_id, ps_frame_id,
+    wire unused = ^{q_push_ok, q_afull, fb_alloc_fid, rg_busy, ps_roi_id, ps_frame_id,
                     ps_eol, ps_eof, ps_first, ps_split, ps_err_zero};
 
 endmodule

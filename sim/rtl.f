@@ -5,7 +5,6 @@
 ../rtl/common/skid_buffer.sv
 ../rtl/regfile.sv
 ../rtl/roi_desc_queue.sv
-../rtl/roi_cpl_queue.sv
 ../rtl/frame_buf_mgr.sv
 ../rtl/u02_scheduler.sv
 ../rtl/row_cmd_gen.sv

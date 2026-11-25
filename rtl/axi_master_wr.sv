@@ -50,9 +50,9 @@ module axi_master_wr
 
     // Sang frame_buf_mgr
     output logic        commit_evt,
-    output logic [1:0]  commit_idx,
+    output fb_idx_t     commit_idx,
     output logic        abort_evt,
-    output logic [1:0]  abort_idx,
+    output fb_idx_t     abort_idx,
     output logic        bus_err_evt
 );
 
@@ -68,9 +68,9 @@ module axi_master_wr
 
     // ---------------- Hàng đợi meta chờ BRESP ----------------
     logic       mq_push, mq_pop, mq_full, mq_empty;
-    logic [3:0] mq_din, mq_dout;             // {buf_idx, kind}
+    logic [FB_IDX_W+1:0] mq_din, mq_dout;    // {buf_idx, kind}
 
-    sync_fifo #(.DW(4), .DEPTH(4)) u_meta (
+    sync_fifo #(.DW(FB_IDX_W + 2), .DEPTH(4)) u_meta (
         .clk(clk), .rst_n(rst_n), .wr_en(mq_push), .wr_data(mq_din), .full(mq_full),
         .rd_en(mq_pop), .rd_data(mq_dout), .empty(mq_empty), .count()
     );
@@ -78,7 +78,7 @@ module axi_master_wr
     logic [OW-1:0] ost;          // burst đã nạp AW, chưa có BRESP
     logic [OW-1:0] wq;           // burst đã nạp AW, chưa gửi xong W
     logic [3:0]    wbeat;
-    logic [2:0]    buf_err;      // đã có BRESP lỗi cho buffer i
+    logic [NUM_FB-1:0] buf_err;  // đã có BRESP lỗi cho buffer i
 
     wire aw_free   = !awvalid || awready;
     wire is_abort  = (wc_cmd.kind == WR_ABORT);
@@ -102,10 +102,10 @@ module axi_master_wr
     wire   w_hs     = wvalid && wready;
 
     // B
-    logic [1:0] b_buf;
+    fb_idx_t    b_buf;
     wr_kind_t   b_kind;
     logic       b_err;
-    assign b_buf  = mq_dout[3:2];
+    assign b_buf  = mq_dout[FB_IDX_W+1:2];
     assign b_kind = wr_kind_t'(mq_dout[1:0]);
     assign b_err  = (bresp != 2'b00);
 

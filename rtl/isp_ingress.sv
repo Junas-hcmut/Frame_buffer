@@ -39,7 +39,7 @@ module isp_ingress
     // frame_buf_mgr
     output logic        alloc_req,
     input  logic        alloc_ok,
-    input  logic [1:0]  alloc_idx,
+    input  fb_idx_t     alloc_idx,
 
     // Sang axi_master_wr (FWFT)
     output logic        wd_valid,
@@ -115,7 +115,7 @@ module isp_ingress
     logic [8:0]  y;            // 0..479
     logic        expect_sof;   // pixel SOF của chính khung vừa cấp buffer
     logic [31:0] base;
-    logic [1:0]  buf_idx;
+    fb_idx_t     buf_idx;
     logic [3:0]  wib;          // số từ trong burst hiện tại
     logic [12:0] burst_idx;    // 0..FRAME_BURSTS-1
 

@@ -26,3 +26,6 @@ desktop.ini
 *~
 obj_*/
 *.hex
+
+# Log mô phỏng cục bộ
+sim/logs/

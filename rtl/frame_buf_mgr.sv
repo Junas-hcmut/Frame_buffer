@@ -1,28 +1,26 @@
 `timescale 1ns / 1ps
 
 // =====================================================================
-// frame_buf_mgr: quản lý NUM_FB (=3) frame buffer trong DDR.
+// frame_buf_mgr: quản lý 2 frame buffer (ping-pong) trong DDR.
 //
-// Trạng thái mỗi buffer: FREE -> WRITING -> READY <-> READING -> ...
-//  - Writer xin buffer (alloc): ưu tiên FREE; nếu không có, thu hồi
-//    buffer READY cũ nhất không bị đọc ("khung mới nhất thắng").
+// Trạng thái mỗi buffer: FREE -> WRITING -> READY <-> READING
+//  - Writer xin buffer (alloc) ở đầu khung: ưu tiên FREE; nếu không có,
+//    thu hồi buffer READY không bị đọc; nếu cả hai READY thì thu hồi
+//    buffer cũ hơn ("khung mới nhất thắng"); nếu buffer còn lại đang
+//    READING (hoặc đang WRITING) thì từ chối, isp_ingress bỏ khung đó.
 //  - Khung chỉ vào READY khi BRESP của burst cuối đã về (commit).
 //  - Reader (scheduler) tra theo frame_id: chỉ READY/READING mới hợp lệ;
 //    không tìm thấy -> ROI bị STALE.
 //  - Ưu tiên reader: buffer đang được acquire trong chu kỳ này không bị
 //    alloc thu hồi.
 //
-// Thứ tự commit (sửa lỗi 3, review 06/11/2026):
-//  Bản cũ dùng age[i] = bộ đếm 16 bit lúc commit và chọn age nhỏ nhất.
-//  Sau 65.536 khung (~36 phút @30 fps) bộ đếm tràn vòng: khung MỚI NHẤT
-//  nhận age = 0 và bị thu hồi trước khung cũ.
-//  Bản mới dùng ma trận tuổi (age matrix) NUM_FB x NUM_FB:
-//     older[i][j] = 1  <=>  buffer i được commit TRƯỚC buffer j
-//  Commit buffer k: hàng k xóa về 0 (k không cũ hơn ai), cột k đặt 1
-//  (mọi buffer khác cũ hơn k). Giữa các buffer đã từng commit, ma trận
-//  luôn là một thứ tự toàn phần -> không bao giờ tràn vòng, kể cả khi
-//  một buffer bị reader giữ rất lâu. Chi phí: NUM_FB*(NUM_FB-1) = 6 FF
-//  thay cho 3x16 + 16 = 64 FF.
+// Thứ tự commit: với 2 buffer chỉ cần 1 bit 'newest' = chỉ số buffer
+// commit gần nhất. Hai buffer cùng READY thì buffer còn lại (!newest)
+// là buffer cũ hơn. Không có bộ đếm tuổi nên không có lỗi tràn vòng.
+//
+// Chỉ có một reader (scheduler phục vụ 1 ROI mỗi lúc và nhả buffer ở chu
+// kỳ kết thúc, không dispatch cùng chu kỳ đó), nên không cần đếm số reader:
+// trạng thái READING đủ để biết buffer đang bị giữ.
 // =====================================================================
 module frame_buf_mgr
     import u02_pkg::*;
@@ -33,22 +31,22 @@ module frame_buf_mgr
     // Writer (isp_ingress)
     input  logic        alloc_req,
     output logic        alloc_ok,
-    output logic [1:0]  alloc_idx,
+    output fb_idx_t     alloc_idx,
     output logic [7:0]  alloc_fid,
 
     // Kết thúc ghi (axi_master_wr)
     input  logic        commit_evt,
-    input  logic [1:0]  commit_idx,
+    input  fb_idx_t     commit_idx,
     input  logic        abort_evt,
-    input  logic [1:0]  abort_idx,
+    input  fb_idx_t     abort_idx,
 
     // Reader (scheduler)
     input  logic [7:0]  lookup_fid,     // tra liên tục (tổ hợp)
     output logic        lookup_hit,
-    output logic [1:0]  lookup_idx,
+    output fb_idx_t     lookup_idx,
     input  logic        acq_req,        // chiếm buffer vừa tra được
     input  logic        rel_evt,
-    input  logic [1:0]  rel_idx,
+    input  fb_idx_t     rel_idx,
 
     // Trạng thái cho regfile
     output logic [7:0]  latest_fid,
@@ -61,53 +59,35 @@ module frame_buf_mgr
 
     fb_state_t   st  [NUM_FB];
     logic [7:0]  fid [NUM_FB];
-    logic [NUM_FB-1:0] older [NUM_FB];   // older[i][j]: i commit trước j (đường chéo không dùng)
-    logic [1:0]  rc  [NUM_FB];     // số reader đang giữ
-
+    fb_idx_t     newest;               // buffer commit gần nhất
     logic [7:0]  fid_cnt;
 
     // ---------------- Tra cứu cho reader ----------------
+    logic [NUM_FB-1:0] hit;
     always_comb begin
-        lookup_hit = 1'b0;
-        lookup_idx = '0;
-        for (int i = NUM_FB - 1; i >= 0; i--) begin
-            if ((st[i] == FB_READY || st[i] == FB_READING) && fid[i] == lookup_fid) begin
-                lookup_hit = 1'b1;
-                lookup_idx = 2'(i);
-            end
-        end
+        for (int i = 0; i < NUM_FB; i++)
+            hit[i] = (st[i] == FB_READY || st[i] == FB_READING) && fid[i] == lookup_fid;
+        lookup_hit = |hit;
+        lookup_idx = hit[0] ? 1'b0 : 1'b1;
     end
 
     wire acq_fire = acq_req && lookup_hit;
 
     // ---------------- Chọn buffer cho writer ----------------
-    logic              found_free, found_ready;
-    logic [1:0]        free_idx, ready_idx;
-    logic [NUM_FB-1:0] elig;          // READY, không reader giữ, không bị acquire chu kỳ này
-    logic              is_oldest;
-
+    logic [NUM_FB-1:0] free, elig;     // elig: READY và không bị acquire chu kỳ này
     always_comb begin
-        found_free  = 1'b0;  free_idx  = '0;
-        found_ready = 1'b0;  ready_idx = '0;
-        for (int i = NUM_FB - 1; i >= 0; i--) begin
-            if (st[i] == FB_FREE) begin
-                found_free = 1'b1;
-                free_idx   = 2'(i);
-            end
-        end
-        for (int i = 0; i < NUM_FB; i++)
-            elig[i] = (st[i] == FB_READY) && (rc[i] == 2'd0) && !(acq_fire && lookup_idx == 2'(i));
-        // buffer cũ nhất = buffer đủ điều kiện, cũ hơn mọi buffer đủ điều kiện khác
         for (int i = 0; i < NUM_FB; i++) begin
-            is_oldest = elig[i];
-            for (int j = 0; j < NUM_FB; j++)
-                if (j != i && elig[j] && !older[i][j]) is_oldest = 1'b0;
-            if (is_oldest && !found_ready) begin
-                found_ready = 1'b1;
-                ready_idx   = 2'(i);
-            end
+            free[i] = (st[i] == FB_FREE);
+            elig[i] = (st[i] == FB_READY) && !(acq_fire && lookup_idx == fb_idx_t'(i));
         end
     end
+
+    wire     found_free  = |free;
+    wire     found_ready = |elig;
+    fb_idx_t free_idx, ready_idx;
+    assign free_idx  = free[0] ? 1'b0 : 1'b1;
+    assign ready_idx = (&elig) ? ~newest :         // cả hai READY: lấy buffer cũ hơn
+                       (elig[0] ? 1'b0 : 1'b1);
 
     assign alloc_ok  = alloc_req && (found_free || found_ready);
     assign alloc_idx = found_free ? free_idx : ready_idx;
@@ -118,10 +98,9 @@ module frame_buf_mgr
         if (!rst_n) begin
             for (int i = 0; i < NUM_FB; i++) begin
                 st[i]  <= FB_FREE;
-                fid[i]   <= '0;
-                older[i] <= '0;
-                rc[i]    <= '0;
+                fid[i] <= '0;
             end
+            newest        <= '0;
             fid_cnt       <= '0;
             latest_fid    <= '0;
             latest_valid  <= 1'b0;
@@ -148,15 +127,11 @@ module frame_buf_mgr
 
             // Khung ghi xong
             if (commit_evt) begin
-                st[commit_idx]  <= FB_READY;
-                // commit_idx thành buffer mới nhất
-                for (int j = 0; j < NUM_FB; j++) begin
-                    if (2'(j) == commit_idx) older[j]             <= '0;
-                    else                     older[j][commit_idx] <= 1'b1;
-                end
-                latest_fid      <= fid[commit_idx];
-                latest_valid    <= 1'b1;
-                cnt_committed   <= cnt_committed + 1'b1;
+                st[commit_idx] <= FB_READY;
+                newest         <= commit_idx;
+                latest_fid     <= fid[commit_idx];
+                latest_valid   <= 1'b1;
+                cnt_committed  <= cnt_committed + 1'b1;
             end
             if (abort_evt) begin
                 st[abort_idx] <= FB_FREE;
@@ -164,20 +139,20 @@ module frame_buf_mgr
             end
 
             // Reader
-            if (acq_fire) begin
+            if (acq_fire)
                 st[lookup_idx] <= FB_READING;
-                rc[lookup_idx] <= rc[lookup_idx] + 1'b1;
-            end
-            if (rel_evt && rc[rel_idx] != 2'd0) begin
-                // acquire và release cùng buffer trong 1 chu kỳ: giữ READING
-                if (!(acq_fire && lookup_idx == rel_idx)) begin
-                    rc[rel_idx] <= rc[rel_idx] - 1'b1;
-                    if (rc[rel_idx] == 2'd1) st[rel_idx] <= FB_READY;
-                end else begin
-                    rc[rel_idx] <= rc[rel_idx];
-                end
-            end
+            if (rel_evt && st[rel_idx] == FB_READING)
+                st[rel_idx] <= FB_READY;
         end
     end
+
+    // synopsys translate_off
+    always @(posedge clk) if (rst_n) begin
+        if (acq_fire && rel_evt)
+            $error("frame_buf_mgr: acquire va release cung chu ky (scheduler chi co 1 ROI)");
+        if (acq_fire && st[lookup_idx] == FB_READING)
+            $error("frame_buf_mgr: acquire buffer dang READING");
+    end
+    // synopsys translate_on
 
 endmodule
